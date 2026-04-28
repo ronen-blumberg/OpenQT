@@ -1,0 +1,2 @@
+wcl386 -bt=dos -l=dos4g oqt2qt.c -fe=oqt2qt.exe
+oqt2qt myfile.txt myfile-qt.txt

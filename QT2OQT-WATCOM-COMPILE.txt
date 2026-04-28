@@ -1,0 +1,2 @@
+wcl386 -bt=dos -l=dos4g qt2oqt.c -fe=qt2oqt.exe
+qt2oqt MYFILE.TXT OUTPUT.TXT

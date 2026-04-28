@@ -1,0 +1,3 @@
+project : C:\dos\MS-DOS\C-PROGS\OPENQT\OPENQT.exe .SYMBOLIC
+
+!include C:\dos\MS-DOS\C-PROGS\OPENQT\OPENQT.mk1

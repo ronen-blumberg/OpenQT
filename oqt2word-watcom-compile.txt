@@ -1,0 +1,3 @@
+wcl386 -bt=dos -l=dos4g oqt2word.c -fe=oqt2word.exe
+
+oqt2word input.txt output.txt

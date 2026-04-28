@@ -1,0 +1,3 @@
+@ECHO OFF
+ARABVGA
+OPENQT /A %1 %2 %3

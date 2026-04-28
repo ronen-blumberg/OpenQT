@@ -1,0 +1,89 @@
+============================================================
+            OPENQT v3.2 - USER GUIDE
+============================================================
+
+ENGLISH GUIDE
+-------------
+
+OpenQT is a trilingual word processor for DOS that
+supports English, Hebrew and Arabic on one screen
+simultaneously. Press F4 to cycle between languages.
+
+KEY COMMANDS:
+  F1   Help            F2  Save           F3  Open
+  F4   Switch lang     F5  RTL toggle     F7  Find
+  F8   Replace         F9  Paste block    F10 Embed LTR
+  Ctrl+B Bold          Ctrl+U Underline
+  Ctrl+Z Undo          Ctrl+Y Redo
+  Alt+X  Exit
+
+LAUNCHERS:
+  OQT 3 file   Trilingual (Hebrew + Arabic + English)
+  OQTH  file   Hebrew + English only
+  OQTA  file   Arabic + English only
+
+ARABIC SHAPING (v3.2):
+  Cursive joining is automatic. Letters connect to their
+  neighbours when CP864 provides positional form bytes.
+  All four forms (isolated/initial/medial/final) used
+  where available.
+
+ENCRYPTION:
+  File menu -> Save Encrypted -> enter password.
+  Magic header OQT-ENC1 marks the file.
+  Same password unlocks; works for all three scripts.
+
+CONVERTERS:
+  oqt2word file.txt out.txt   OpenQT  -> UTF-8
+  txt2oqt  utf8.txt  out.txt  UTF-8   -> OpenQT
+  oqt2qt   file.txt  out.qt   OpenQT  -> QText 5.5
+  qt2oqt   file.qt   out.txt  QText   -> OpenQT
+
+
+Žƒ˜‰Š ’˜‰š
+------------
+
+€…”—‰… „…€ Ž’ƒ šŽŒ‰Œ‰ šŒš Œ™…‰
+Œƒ…‘ „š…ŽŠ €‚Œ‰š ’˜‰š …’˜‰š
+… †Ž‰š €…š… Ž‘Š.
+„—™ F4 ‹ƒ‰ Œ’…˜ ‰ ™”…š.
+
+Ž—™‰ ™‰Ž…™‰‰:
+  F2 ™Ž‰˜„            F3 ”š‰‡„
+  F4 „‡Œ”š ™”„        F5 ‹‰……
+  F7 ‡‰”…™            F8 „‡Œ”„
+  F9 „ƒ—             F10 €‚Œ‰š Ž™…–š
+  Ctrl+B Ž…ƒ‚™        Ctrl+U —… š‡š…
+  Alt+X ‰–‰€„
+
+šŽ‰‹„ ‹‰…… ˆ—‘ˆ, ‘…”‰…š €…ˆ…Žˆ‰…š,
+‡‰”…™ „‡Œ”„, ‘‘Ž€…š, Œ…—‰.
+
+Œ‡†…˜ ŒŽ‘ŽŠ „˜€™‰ „—™ ESC.
+
+
+Ïûýû ©ÇûßÑ©ýÉ
+-------------
+
+Çè©ò üýè ªý ï®ÑÑ ò¾è¾ «ûÇ«ý ÇûûîÉ
+ûòØÇï Ïè¼ ýÏßï ÇûÇò­ûýÒýÉ èÇûß©ÑýÉ
+èÇûßÑ©ýÉ ßûé ½Ç½É èÇ®ÏÉ ïßÇ.
+Çëî× F4 ûª©Ïýû ûîÉ ÇûÇÏ¯Çû.
+
+ïºÇªý® ïóïÉ:
+  F2 ®ºØ              F3 ºª®
+  F4 ª©Ïýû ÇûûîÉ      F5 Çª­Çó
+  F7 ©®«              F8 Ç¼ª©ÏÇû
+  F9 û¾ø              F10 Çò­ûýÒýÉ ïÏï­É
+  Ctrl+B ßÑýë         Ctrl+U ª¼×ýÑ
+  Alt+X ¯Ñè­
+
+ª½üýû ßÑ©ý üÇïû èÇª¾Çû Çû®Ñèº
+Ïßï ÇûÇÑøÇï ÇûßÑ©ýÉ èÇûßûÇïÇª.
+
+Çëî× ESC ûûßèÏÉ ûûï¼ªòÏ.
+
+
+============================================================
+End of guide.   ESC closes.   See README.md for full details.
+============================================================

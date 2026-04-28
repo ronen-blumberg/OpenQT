@@ -1,0 +1,3 @@
+@ECHO OFF
+HEBVGA
+OPENQT %1 %2 %3

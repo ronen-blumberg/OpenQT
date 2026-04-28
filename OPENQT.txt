@@ -1,0 +1,6 @@
+cd C:\dos\MS-DOS\C-PROGS\OPENQT
+wmake -f C:\dos\MS-DOS\C-PROGS\OPENQT\OPENQT.mk -h -e
+wcc386 openqt.c -i="C:\WATCOM/h" -w4 -e25 -zq -od -d2 -6r -bt=dos -fo=.obj -mf
+openqt.c(1196): Warning! W202: Symbol 'full_path' has been defined, but not referenced
+wlink name OPENQT d all sys dos4g op m op maxe=25 op q op symf @OPENQT.lk1
+Execution complete

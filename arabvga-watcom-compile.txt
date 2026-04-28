@@ -1,0 +1,2 @@
+wcl -bt=dos -ml -ox arabvga.c -fe=arabvga.exe
+arabvga

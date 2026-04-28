@@ -1,0 +1,322 @@
+================================================================================
+ OPENQT BIDI PATCH - Changes needed for full bidirectional text support
+================================================================================
+
+FILE: openqt.c
+
+--- CHANGE 1: Add embedded_ltr to Document struct (around line 130) ---
+
+Add after "int rtl_mode;":
+
+    int embedded_ltr;       /* F10: embedded LTR mode within Hebrew text */
+
+
+--- CHANGE 2: Add BiDi constants after HEB_LAST definition (around line 85) ---
+
+/* BiDi character types */
+#define BIDI_R          0   /* Right-to-left (Hebrew) */
+#define BIDI_L          1   /* Left-to-right (English letters) */
+#define BIDI_EN         2   /* European Number */
+#define BIDI_WS         3   /* Whitespace */
+#define BIDI_ON         4   /* Other Neutrals */
+
+
+--- CHANGE 3: Add BiDi structure after heb_final declaration (around line 110) ---
+
+/* BiDi reordering structure */
+typedef struct {
+    unsigned char visual[MAX_LINE_LEN];
+    int log_to_vis[MAX_LINE_LEN];
+    int vis_to_log[MAX_LINE_LEN];
+    unsigned char types[MAX_LINE_LEN];
+    unsigned char levels[MAX_LINE_LEN];
+    int len;
+} BidiLine;
+
+static BidiLine bidi;
+
+
+--- CHANGE 4: Add BiDi functions after is_hebrew_char() (around line 290) ---
+
+/* Get BiDi character type */
+int get_bidi_type(unsigned char ch)
+{
+    if (ch >= HEB_FIRST && ch <= HEB_LAST) return BIDI_R;
+    if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) return BIDI_L;
+    if (ch >= '0' && ch <= '9') return BIDI_EN;
+    if (ch == ' ' || ch == '\t') return BIDI_WS;
+    return BIDI_ON;
+}
+
+/* Perform BiDi reordering on a line */
+void bidi_reorder(const char *logical, int len)
+{
+    int i, j, k;
+    int run_start, run_end;
+    int max_level, level;
+    int temp_log[MAX_LINE_LEN];
+    unsigned char temp_vis[MAX_LINE_LEN];
+    int base_level;
+    
+    if (len <= 0 || len >= MAX_LINE_LEN) { bidi.len = 0; return; }
+    
+    bidi.len = len;
+    base_level = doc.rtl_mode ? 1 : 0;
+    
+    /* Step 1: Assign character types */
+    for (i = 0; i < len; i++) {
+        bidi.types[i] = get_bidi_type((unsigned char)logical[i]);
+        bidi.levels[i] = base_level;
+    }
+    
+    /* Step 2: Assign embedding levels */
+    for (i = 0; i < len; i++) {
+        if (bidi.types[i] == BIDI_R) {
+            bidi.levels[i] = 1;  /* Hebrew always RTL */
+        }
+        else if (bidi.types[i] == BIDI_L || bidi.types[i] == BIDI_EN) {
+            /* English and numbers: embedded LTR in RTL context */
+            bidi.levels[i] = doc.rtl_mode ? 2 : 0;
+        }
+        else {
+            /* Neutrals: resolve by surrounding context */
+            int prev_strong = base_level ? BIDI_R : BIDI_L;
+            int next_strong = base_level ? BIDI_R : BIDI_L;
+            
+            for (j = i - 1; j >= 0; j--) {
+                if (bidi.types[j] == BIDI_R) { prev_strong = BIDI_R; break; }
+                if (bidi.types[j] == BIDI_L || bidi.types[j] == BIDI_EN) { prev_strong = BIDI_L; break; }
+            }
+            for (j = i + 1; j < len; j++) {
+                if (bidi.types[j] == BIDI_R) { next_strong = BIDI_R; break; }
+                if (bidi.types[j] == BIDI_L || bidi.types[j] == BIDI_EN) { next_strong = BIDI_L; break; }
+            }
+            
+            if (prev_strong == next_strong) {
+                bidi.levels[i] = (prev_strong == BIDI_R) ? 1 : (doc.rtl_mode ? 2 : 0);
+            } else {
+                bidi.levels[i] = base_level;
+            }
+        }
+    }
+    
+    /* Step 3: Initialize for reordering */
+    for (i = 0; i < len; i++) {
+        temp_log[i] = i;
+        temp_vis[i] = (unsigned char)logical[i];
+    }
+    
+    /* Step 4: Reorder if RTL base */
+    if (doc.rtl_mode) {
+        max_level = 0;
+        for (i = 0; i < len; i++) {
+            if (bidi.levels[i] > max_level) max_level = bidi.levels[i];
+        }
+        
+        /* Reverse runs at each level from max down to 1 */
+        for (level = max_level; level >= 1; level--) {
+            i = 0;
+            while (i < len) {
+                if (bidi.levels[i] >= level) {
+                    run_start = i;
+                    while (i < len && bidi.levels[i] >= level) i++;
+                    run_end = i - 1;
+                    
+                    /* Reverse this run */
+                    for (j = run_start, k = run_end; j < k; j++, k--) {
+                        unsigned char tc = temp_vis[j];
+                        int tl = temp_log[j];
+                        temp_vis[j] = temp_vis[k];
+                        temp_log[j] = temp_log[k];
+                        temp_vis[k] = tc;
+                        temp_log[k] = tl;
+                    }
+                } else {
+                    i++;
+                }
+            }
+        }
+        
+        /* Reverse entire line for RTL base */
+        for (j = 0, k = len - 1; j < k; j++, k--) {
+            unsigned char tc = temp_vis[j];
+            int tl = temp_log[j];
+            temp_vis[j] = temp_vis[k];
+            temp_log[j] = temp_log[k];
+            temp_vis[k] = tc;
+            temp_log[k] = tl;
+        }
+    }
+    
+    /* Step 5: Store results */
+    for (i = 0; i < len; i++) {
+        bidi.visual[i] = temp_vis[i];
+        bidi.vis_to_log[i] = temp_log[i];
+    }
+    
+    /* Build reverse mapping */
+    for (i = 0; i < len; i++) {
+        bidi.log_to_vis[bidi.vis_to_log[i]] = i;
+    }
+}
+
+int visual_to_logical(int vis_pos)
+{
+    if (vis_pos < 0) return 0;
+    if (vis_pos >= bidi.len) return bidi.len;
+    return bidi.vis_to_log[vis_pos];
+}
+
+int logical_to_visual(int log_pos)
+{
+    if (log_pos < 0) return 0;
+    if (log_pos >= bidi.len) return bidi.len;
+    return bidi.log_to_vis[log_pos];
+}
+
+
+--- CHANGE 5: Add toggle_embedded_ltr function (after toggle_hebrew) ---
+
+void toggle_embedded_ltr(void)
+{
+    if (doc.hebrew_mode) {
+        doc.embedded_ltr = !doc.embedded_ltr;
+        draw_menu_bar();
+        draw_status_bar();
+    }
+}
+
+
+--- CHANGE 6: Modify draw_line() function to use BiDi ---
+
+Replace the RTL drawing section with:
+
+    /* Perform BiDi reordering */
+    bidi_reorder(line, len);
+    
+    if (doc.rtl_mode) {
+        /* RTL mode: right-align text with BiDi reordering */
+        text_start = SCREEN_WIDTH - len;
+        if (text_start < 0) text_start = 0;
+        
+        for (x = 0; x < SCREEN_WIDTH; x++) {
+            int vis_idx = x - text_start;
+            int log_idx = -1;
+            
+            if (vis_idx >= 0 && vis_idx < len) {
+                log_idx = visual_to_logical(vis_idx);
+            }
+            
+            /* Block highlighting uses logical position */
+            in_block = 0;
+            if (doc.block_active && log_idx >= 0 && log_idx < len) {
+                /* ... existing block highlighting code using log_idx ... */
+            }
+            attr = in_block ? CLR_BLOCK : CLR_NORMAL;
+            
+            if (vis_idx >= 0 && vis_idx < len) {
+                ch = bidi.visual[vis_idx];  /* Use visual buffer! */
+            } else {
+                ch = ' ';
+            }
+            write_char(x, screen_row, ch, attr);
+        }
+    }
+
+
+--- CHANGE 7: Modify update_cursor() to use BiDi ---
+
+After getting len, add:
+
+    if (line) bidi_reorder(line, len);
+
+In RTL section, change cursor positioning:
+
+    if (doc.cursor_x >= len) {
+        screen_x = text_start - 1;
+        if (screen_x < 0) screen_x = 0;
+    } else {
+        int vis_pos = logical_to_visual(doc.cursor_x);
+        screen_x = text_start + vis_pos;
+    }
+
+
+--- CHANGE 8: Modify process_key() for F10 and character input ---
+
+In extended key handling, change F10:
+
+    case KEY_F10: toggle_embedded_ltr(); draw_screen(); break;
+
+In character input section, change to:
+
+    if (key >= 32 && key < 256) {
+        ch = (unsigned char)key;
+        
+        /* Character translation:
+         * - Hebrew mode ON and embedded_ltr OFF: translate to Hebrew (except numbers)
+         * - Hebrew mode ON and embedded_ltr ON (F10): type English directly
+         * - Hebrew mode OFF: type English directly
+         */
+        if (doc.hebrew_mode && !doc.embedded_ltr) {
+            if (ch >= 32 && ch < 128 && !(ch >= '0' && ch <= '9')) {
+                unsigned char heb = translate_hebrew(ch);
+                if (heb) ch = heb;
+            }
+        }
+        
+        insert_char(ch);
+        draw_screen();
+    }
+
+
+--- CHANGE 9: Initialize embedded_ltr in init_document() ---
+
+Add after "doc.rtl_mode = 1;":
+
+    doc.embedded_ltr = 0;
+
+
+--- CHANGE 10: Update status bar to show embedded mode ---
+
+In draw_status_bar(), change pos format:
+
+    sprintf(pos, "Ln %d/%d Col %d  %s %s %s%s",
+            doc.cursor_y + 1, doc.num_lines, doc.cursor_x + 1,
+            doc.insert_mode ? "INS" : "OVR", 
+            doc.rtl_mode ? "RTL" : "LTR",
+            doc.hebrew_mode ? "HEB" : "ENG",
+            doc.embedded_ltr ? "+E" : "");
+
+
+--- CHANGE 11: Update menu bar to show mode ---
+
+In draw_menu_bar(), change mode display:
+
+    if (doc.hebrew_mode) {
+        if (doc.embedded_ltr) {
+            strcpy(mode_str, "[HEB+ENG]");
+        } else {
+            strcpy(mode_str, "[Hebrew]");
+        }
+    } else {
+        strcpy(mode_str, "[English]");
+    }
+    write_string(SCREEN_WIDTH - strlen(mode_str) - 1, 0, mode_str, CLR_MENU);
+
+
+================================================================================
+USAGE:
+
+1. Type Hebrew text normally (F4 for Hebrew keyboard mode)
+2. Numbers are automatically displayed LTR (123, not 321)
+3. Press F10 to enter embedded English mode within Hebrew text
+4. Press F10 again to return to Hebrew mode
+5. The visual display handles all reordering automatically
+
+EXAMPLE:
+User types: שלום [space] 123 [space] [F10] HELLO [F10] [space] שלום [space] 456
+Logical:    "שלום 123 HELLO שלום 456"
+Visual:     "456 שלום HELLO 123 שלום" (right-aligned)
+
+The Hebrew reads right-to-left, numbers stay 123/456, English stays HELLO.
+================================================================================

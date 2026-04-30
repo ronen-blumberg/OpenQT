@@ -7,10 +7,10 @@ REM support, so it overlays only 0xA0-0xFE on top of HEBVGA's full font.
 REM Until you've rebuilt ARABVGA, use Hebrew or Arabic sessions
 REM separately:
 REM
-REM   OQT H file.txt   -> Hebrew + English (HEBVGA)
-REM   OQT A file.txt   -> Arabic + English (ARABVGA, /A flag for ASCII boxes)
-REM   OQT 3 file.txt   -> tri-script (requires rebuilt ARABVGA with /P)
-REM   OQT   file.txt   -> defaults to Hebrew (legacy behavior)
+REM   OQT H file.txt   == Hebrew + English (HEBVGA)
+REM   OQT A file.txt   == Arabic + English (ARABVGA, /A flag for ASCII boxes)
+REM   OQT 3 file.txt   == tri-script (requires rebuilt ARABVGA with /P)
+REM   OQT   file.txt   == defaults to Hebrew (legacy behavior)
 
 IF "%1"=="H" GOTO HEB
 IF "%1"=="h" GOTO HEB

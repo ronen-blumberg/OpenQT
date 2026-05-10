@@ -1,16 +1,19 @@
 # OpenQT
 
-A Hebrew / Arabic / English word processor for DOS, plus the converter
-utilities `oqt2word` (export to UTF-8) and `txt2oqt` (import from UTF-8).
-The editor itself is a QText 5.5 clone with full BiDi (right-to-left)
-support, inline formatting, undo/redo, password encryption, Arabic
-positional shaping on the DOS screen, and **true trilingual editing** —
-Hebrew, Arabic, and English can all coexist on the same line of the same
-document, simultaneously visible on the VGA screen.
+A Hebrew / Arabic / **Russian** / English word processor for DOS, plus
+the converter utilities `oqt2word` (export to UTF-8) and `txt2oqt`
+(import from UTF-8). The editor itself is a QText 5.5 clone with full
+BiDi (right-to-left) support, inline formatting, undo/redo, password
+encryption, Arabic positional shaping on the DOS screen, and **true
+trilingual editing** — Hebrew, Arabic, and English can all coexist on
+the same line of the same document, simultaneously visible on the VGA
+screen. Russian (CP866) is supported as its own session — see
+[Russian mode](#russian-mode) for why it doesn't combine with the
+trilingual screen font.
 
 > **Author:** Ronen Blumberg  
 > **License:** Public Domain  
-> **Current version:** OpenQT 3.2  
+> **Current version:** OpenQT 3.3.0  
 > **Platform:** Real-mode 16-bit DOS, or 32-bit DOS via DOS4GW (bundled).
 
 ---
@@ -23,10 +26,12 @@ document, simultaneously visible on the VGA screen.
 - [OpenQT — the editor](#openqt--the-editor)
   - [Launchers](#launchers)
   - [Trilingual mode (Hebrew + Arabic + English)](#trilingual-mode-hebrew--arabic--english)
+  - [Russian mode](#russian-mode)
   - [Keyboard reference](#keyboard-reference)
   - [Docs viewer (Help → Docs…)](#docs-viewer-help--docs)
   - [Hebrew typing layout](#hebrew-typing-layout)
   - [Arabic typing layout](#arabic-typing-layout)
+  - [Russian typing layout](#russian-typing-layout)
   - [BiDi and visual order](#bidi-and-visual-order)
   - [Arabic positional shaping](#arabic-positional-shaping)
   - [File format](#file-format)
@@ -50,10 +55,12 @@ document, simultaneously visible on the VGA screen.
 | `oqt2qt.c` / `oqt2qt.exe` | Convert OpenQT to QText 5.5 file format. |
 | `qt2oqt.c` / `qt2oqt.exe` | Convert QText 5.5 to OpenQT (visual → logical reorder). |
 | `arabvga.c` / `ARABVGA.EXE` | Uploads CP864 Arabic font into VGA character generator. Supports `/P` for partial overlay (used by trilingual mode). |
-| `OPENQT.HLP` | Trilingual user guide loaded by the in-editor Docs viewer (Alt+H → Docs). Plain text in OpenQT mixed CP862+CP864 byte format. |
-| `make_hlp.py` | Helper script that regenerates `OPENQT.HLP` from a UTF-8 source string (Unicode → OpenQT byte mapping). |
+| `rusvga.c` / `RUSVGA.EXE` | Uploads CP866 Russian font into VGA character generator. New in 3.3. |
+| `make_rusvga.py` | Helper script that regenerates `rusvga.c` (combines HEBVGA's CP437 base with Cyrillic glyphs from the Linux X11 8x13 font). |
+| `OPENQT.HLP`, `OPENQTH.HLP`, `OPENQTA.HLP`, `OPENQTR.HLP` | Per-language user guides loaded by the in-editor Docs viewer (Alt+H → Docs). Each one is plain text in OpenQT's mixed-codepage byte format, matched to a single VGA font. The viewer auto-picks the file that matches the active input language so every byte renders correctly. |
+| `make_hlp.py` | Helper script that regenerates the four `*.HLP` files from a single UTF-8 source (Unicode → OpenQT byte mapping). |
 | `HEBVGA.COM` | Uploads CP862 Hebrew font into VGA character generator. |
-| `OQT.BAT`, `OQTH.BAT`, `OQTA.BAT` | Launchers (see below). |
+| `OQT.BAT`, `OQTH.BAT`, `OQTA.BAT`, `OQTR.BAT` | Launchers (see below). |
 | `DOS4GW.EXE` | DOS extender for 32-bit builds. |
 | `_arabic_font/` | Reference NLS files (no longer needed at runtime). |
 
@@ -67,11 +74,12 @@ In a DOS environment (or DOSBox):
 OQT 3 mydocument.txt  # Hebrew + Arabic + English (trilingual)
 OQTA mydocument.txt   # Arabic + English
 OQTH mydocument.txt   # Hebrew + English
+OQTR mydocument.txt   # Russian + English (CP866)
 ```
 
 Inside the editor:
 
-- **F4** — cycle input language: English → Hebrew → Arabic → English …
+- **F4** — cycle input language: English → Hebrew → Arabic → Russian → English …
 - **F5** — toggle right-to-left layout
 - **F2** — save
 - **F3** — open another file
@@ -147,6 +155,31 @@ delete it before testing. DOS resolves `ARABVGA` (no extension) as
 | `/F=path /CP=N` | Load codepage N from a CPI file instead of the embedded font. |
 | `/?` | Show help. |
 
+### Russian font uploader (16-bit, must be real-mode)
+
+```
+wcl -bt=dos -ml -ox rusvga.c -fe=rusvga.exe
+```
+
+`rusvga.c` is **generated** by `make_rusvga.py` (Python on the host) —
+the script extracts HEBVGA.COM's CP437 base font and overlays Cyrillic
++ CP866-specific glyphs from the Linux X11 fixed-misc 8x13 raster font
+(from `xfonts-base`), padded into the 8x16 VGA cell. Re-run
+`make_rusvga.py` if you tweak the font; do not hand-edit the embedded
+`fontbuf[]` array in `rusvga.c`. The resulting `RUSVGA.EXE` is ~24 KB.
+
+`RUSVGA` flags:
+
+| Flag | Meaning |
+|---|---|
+| (none) | Full 256-character upload (Russian-only mode). |
+| `/F=path /CP=N` | Load codepage N from a CPI file instead of the embedded font. |
+| `/?` | Show help. |
+
+There is **no `/P` partial-upload mode** because Russian (CP866) doesn't
+combine with Hebrew (CP862) or Arabic (CP864) — see
+[Russian mode](#russian-mode).
+
 There are no tests and no CI — this is a personal project.
 
 ---
@@ -158,10 +191,13 @@ draws directly to VGA text-mode memory at 0xB8000 and uses BIOS
 interrupts for input, so it has zero dependencies beyond standard DOS.
 The whole runtime fits in roughly 75 KB.
 
-Three input languages share the editor: English, Hebrew, Arabic. They
-coexist in the same document and on the same line — BiDi reordering
-takes care of display order while the file stores the text in its
-natural typing (logical) order.
+Four input languages share the editor: English, Hebrew, Arabic, and
+Russian. English, Hebrew, and Arabic coexist in the same document on
+the same line — BiDi reordering takes care of display order while the
+file stores the text in its natural typing (logical) order. Russian
+runs as its own session (English + Russian only) because CP866 byte
+ranges overlap CP862 Hebrew and CP864 Arabic; see
+[Russian mode](#russian-mode).
 
 Key features:
 
@@ -191,8 +227,10 @@ section below for the technique.
 | `OQT 3 file.txt` | **Trilingual** — Hebrew + Arabic + English on one screen. Loads HEBVGA (full CP862 font), then `ARABVGA /P` (overlays just 0xA0–0xFE with Arabic letters), then OpenQT with `/A`. |
 | `OQTH file.txt` | Hebrew + English only. Runs `HEBVGA`, then OpenQT. |
 | `OQTA file.txt` | Arabic + English only. Runs `ARABVGA`, then OpenQT with `/A`. |
+| `OQTR file.txt` | Russian + English only (CP866). Runs `RUSVGA`, then OpenQT with `/R`. |
 | `OQT H file.txt` | Dispatcher form — same as `OQTH`. |
 | `OQT A file.txt` | Dispatcher form — same as `OQTA`. |
+| `OQT R file.txt` | Dispatcher form — same as `OQTR`. |
 | `OQT file.txt` | Default — Hebrew + English (legacy behavior). |
 
 The `/A` flag tells OpenQT that CP864 Arabic glyphs are loaded into the
@@ -296,6 +334,65 @@ So a trilingual `.txt` round-trips cleanly through UTF-8.
   layout overlap on every key. F4 chooses which mapping is active for
   the next keystrokes.
 
+### Russian mode
+
+OpenQT 3.3 added a **Russian session** — English + Russian only,
+cannot mix with Hebrew or Arabic in the same screen or document.
+
+#### Why it's a separate session
+
+The trilingual trick works because CP862 Hebrew (letters at 0x80–0x9A)
+and CP864 Arabic (letters at 0xA0–0xFE) live in **disjoint byte
+ranges**. CP866 Russian doesn't: Cyrillic uppercase sits at 0x80–0x9F
+(overlapping Hebrew), Cyrillic lowercase at 0xA0–0xAF + 0xE0–0xEF
+(overlapping Arabic). The same 8-bit slot would have to hold a Hebrew
+letter, an Arabic letter, *and* a Cyrillic letter at the same time —
+impossible without switching the document buffer to UTF-8 (which would
+be a much larger rewrite of OpenQT's BiDi, shaping, and storage paths).
+
+So Russian is its own thing. CP437 box-drawing at 0xB0–0xDF is intact
+in CP866 (CP866 is just CP437 with Cyrillic substituted at 0x80–0xAF
+and 0xE0–0xFE), so `OPENQT /R` does **not** need the `/A` ASCII-boxes
+fallback that Arabic mode does.
+
+#### Launching
+
+```
+OQTR mydoc.txt
+```
+
+does the equivalent of:
+
+```
+RUSVGA          ; full upload — CP437 base + Cyrillic at 0x80-0xAF, 0xE0-0xFE
+OPENQT /R ...   ; sets input_lang=LANG_RUS and rtl_mode=0 at startup
+```
+
+Inside the editor, **F4** cycles through Eng → Heb → Ara → Rus. The
+direction (`rtl_mode`) auto-flips with the language: RTL for Hebrew /
+Arabic, LTR for English / Russian. F5 still overrides manually.
+
+#### What works in Russian mode
+
+- All 33 Russian letters (uppercase + lowercase) plus Ё/ё via the
+  standard JCUKEN keyboard layout.
+- ASCII English passthrough — type English freely, no F10
+  embedded-LTR dance needed.
+- Bold, underline, undo/redo, search/replace, block ops, encryption —
+  all behave identically to English mode.
+- Box-drawing dialogs render correctly (CP866 keeps CP437 at
+  0xB0–0xDF) — no `/A` ASCII fallback needed.
+
+#### What doesn't
+
+- A document opened in Russian mode and re-opened in Hebrew/Arabic
+  mode renders letter bytes as the wrong script. The 8-bit storage
+  doesn't carry script tags.
+- BiDi reordering is bypassed for Russian text (Russian is LTR), so
+  inserting Russian into a Hebrew/Arabic document via byte-paste won't
+  round-trip — the converter `/R` flag is the right route for taking
+  Russian text out to UTF-8.
+
 ### Keyboard reference
 
 #### Files and editing
@@ -328,7 +425,7 @@ So a trilingual `.txt` round-trips cleanly through UTF-8.
 
 | Key | Action |
 |---|---|
-| **F4** | Cycle input language: English → Hebrew → Arabic → … |
+| **F4** | Cycle input language: English → Hebrew → Arabic → Russian → … (auto-flips RTL/LTR to match) |
 | **F5** | Toggle RTL layout (right-to-left paragraph direction) |
 | **F10** | Toggle "embedded LTR" — type English/digits inline within an RTL paragraph without leaving the current input language |
 
@@ -371,17 +468,28 @@ So a trilingual `.txt` round-trips cleanly through UTF-8.
 
 ### Docs viewer (Help → Docs…)
 
-Open with **Alt+H → Docs…**. The viewer loads `OPENQT.HLP` from disk
-and shows it in a paged, read-only dialog over the editor. Your
-current document is untouched — ESC closes the viewer and returns to
-exactly where you were.
+Open with **Alt+H → Docs…**. The viewer loads one of four `.HLP`
+files from disk, chosen by the current input language (so the loaded
+VGA font matches the file's content), and shows it in a paged
+read-only dialog over the editor. Your current document is untouched
+— ESC closes the viewer and returns to exactly where you were.
 
-The `.HLP` file is **plain text in OpenQT's mixed CP862 + CP864 byte
-encoding** — the same on-disk format as a normal trilingual document.
-Hebrew letters live at 0x80–0x9A, Arabic at 0xA0–0xFE, ASCII below
-0x80. So the docs are written in their native scripts and display
-natively when HEBVGA + ARABVGA fonts are loaded (i.e. under
-`OQT 3 …`).
+| Active input language | File loaded |
+|---|---|
+| Hebrew (LANG_HEB) | `OPENQTH.HLP` (Hebrew + English) |
+| Arabic (LANG_ARA) | `OPENQTA.HLP` (Arabic + English) |
+| Russian (LANG_RUS) | `OPENQTR.HLP` (Russian + English) |
+| English / default (LANG_ENG) | `OPENQT.HLP` (Heb + Ara + English — trilingual, intended for OQT 3 sessions) |
+
+If the language-specific file is missing, the viewer falls back to
+`OPENQT.HLP` (and then to `..\OPENQT.HLP`, `\OPENQT\`, `C:\OPENQT\`).
+
+Each `.HLP` is **plain text in OpenQT's mixed-codepage byte encoding**
+— the same on-disk format as documents in that script. The split is
+necessary because Russian (CP866) byte ranges overlap Hebrew (CP862)
+and Arabic (CP864): a unified quad-script file would render gibberish
+in whichever sections didn't match the loaded font. Each per-language
+file is guaranteed to use only bytes the active session can render.
 
 The viewer:
 
@@ -410,18 +518,28 @@ you've added the file from the host side).
 
 #### Editing the docs
 
-The Python helper `make_hlp.py` regenerates `OPENQT.HLP` from a
-UTF-8 source string at the top of the script. Edit the `CONTENT`
-triple-quoted block (Hebrew and Arabic can be typed naturally as
+The Python helper `make_hlp.py` regenerates **all four** `.HLP` files
+from one source. The script holds four UTF-8 string blocks
+(`HEADER`, `HEBREW_SECTION`, `ARABIC_SECTION`, `RUSSIAN_SECTION`) and
+assembles them into the right combinations:
+
+| File | Sections |
+|---|---|
+| `OPENQT.HLP` | header + Hebrew + Arabic |
+| `OPENQTH.HLP` | header + Hebrew |
+| `OPENQTA.HLP` | header + Arabic |
+| `OPENQTR.HLP` | header + Russian |
+
+Edit the relevant block (each language can be typed naturally as
 UTF-8), then:
 
 ```
 python3 make_hlp.py
 ```
 
-…rewrites `OPENQT.HLP` with the correct OpenQT byte mapping. No
-recompile of `openqt.exe` is needed — the viewer reads the file at
-runtime each time you open it.
+…rewrites all four files with the correct per-codepage byte mapping.
+No recompile of `openqt.exe` is needed — the viewer reads the
+appropriate file at runtime each time you open it.
 
 ### Hebrew typing layout
 
@@ -467,6 +585,38 @@ Punctuation and digits:
 | `,` | و Waw | | `;` | ك Kaf |
 | `.` | ز Zain | | `/` | ظ Zah |
 | `(` | `)` (mirrored) | | `)` | `(` (mirrored) |
+
+### Russian typing layout
+
+CP866 Cyrillic letters live at 0x80–0xAF and 0xE0–0xF1. The keyboard
+layout is the standard **JCUKEN** layout (the layout printed on
+Soviet/Russian PC keycaps). Both letter cases are mapped — unlike
+Hebrew or Arabic, Russian has case.
+
+Letters (lowercase shown; Shift gives uppercase):
+
+| Key | Letter | Key | Letter | Key | Letter |
+|---|---|---|---|---|---|
+| `q` | й (short i) | `w` | ц (tse) | `e` | у (u) |
+| `r` | к (ka) | `t` | е (ye) | `y` | н (en) |
+| `u` | г (ge) | `i` | ш (sha) | `o` | щ (shcha) |
+| `p` | з (ze) | `[` | х (kha) | `]` | ъ (hard sign) |
+| `a` | ф (ef) | `s` | ы (yeru) | `d` | в (ve) |
+| `f` | а (a) | `g` | п (pe) | `h` | р (er) |
+| `j` | о (o) | `k` | л (el) | `l` | д (de) |
+| `;` | ж (zhe) | `'` | э (e) | `z` | я (ya) |
+| `x` | ч (che) | `c` | с (es) | `v` | м (em) |
+| `b` | и (i) | `n` | т (te) | `m` | ь (soft sign) |
+| `,` | б (be) | `.` | ю (yu) | `` ` `` | ё (yo) |
+
+Punctuation and digit keys:
+
+| Key | Result |
+|---|---|
+| `0`–`9` | digits 0–9 (passthrough — CP866 has no Arabic-Indic digits) |
+| `/` | `.` (period) — JCUKEN swap |
+| `?` | `,` (comma) — JCUKEN swap |
+| `~` | Ё (uppercase Yo) |
 
 ### BiDi and visual order
 
@@ -548,6 +698,14 @@ Arabic is an OpenQT-specific dual encoding — readable cleanly by
 OpenQT and by `oqt2word` / `txt2oqt`, but not by tools that expect a
 single standard codepage.
 
+Documents authored in Russian mode are a separate beast: they are
+**standard CP866** byte streams. CP866 byte ranges *overlap* both
+CP862 Hebrew (at 0x80–0x9A) and CP864 Arabic (at 0xA0–0xFE), so a
+CP866 file cannot also contain Hebrew or Arabic letters — and the
+external converters need an explicit `/R` flag to know to interpret
+the bytes as CP866 rather than as the default mixed CP862+CP864
+trilingual encoding.
+
 Inline formatting toggle bytes:
 
 | Byte | Meaning |
@@ -586,13 +744,14 @@ or any modern Unicode-aware editor.
 ### Usage
 
 ```
-oqt2word <input.openqt> <output.utf8>
+oqt2word [/R] <input.openqt> <output.utf8>
 ```
 
-Example:
+Examples:
 
 ```
-oqt2word mydoc.txt mydoc-w.txt
+oqt2word mydoc.txt mydoc-w.txt        # default: Hebrew + Arabic + English
+oqt2word /R rusdoc.txt rusdoc-w.txt   # Russian (CP866) input
 ```
 
 ### What it converts
@@ -609,6 +768,23 @@ oqt2word mydoc.txt mydoc-w.txt
 
 A UTF-8 BOM (`EF BB BF`) is written at the start of the output so Word
 and other editors recognize the encoding immediately.
+
+### `/R` (Russian) mode
+
+When `/R` is given, every high byte (0x80–0xFF) is routed through a
+single CP866 → Unicode table — Cyrillic letters → U+0410–U+044F,
+Yo / Ye / Yi / Short-U → their codepoints, the box-drawing block
+0xB0–0xDF → U+2500.. block, the misc tail (degree, sqrt, No.,
+currency, etc.) → their Unicode equivalents. This flag is **required**
+for any document written in Russian mode (`OQTR`, `OQT R`, or
+`OPENQT /R`) — without it, the converter would mis-classify Cyrillic
+bytes as Hebrew or Arabic because the byte ranges overlap.
+
+`/R` is also the only mode that round-trips box-drawing
+characters: in default Hebrew/Arabic mode, bytes at 0xB0–0xDF are
+interpreted as part of the Arabic letter range and emitted as Arabic
+codepoints — perfect for Arabic text, but lossy for any document that
+relies on box-drawing as box-drawing.
 
 ### Why basic Arabic block?
 
@@ -644,7 +820,7 @@ converting legacy DOS-encoded Hebrew text files.
 ### Usage
 
 ```
-txt2oqt <input.txt> <output.openqt> [/V] [/D] [/U]
+txt2oqt <input.txt> <output.openqt> [/V] [/D] [/U] [/R]
 ```
 
 Flags:
@@ -654,6 +830,7 @@ Flags:
 | `/V` | Keep visual order (legacy DOS mode only). |
 | `/D` | Force legacy DOS encoding mode (skip BOM auto-detect). |
 | `/U` | Force UTF-8 mode (skip BOM auto-detect). |
+| `/R` | Target OpenQT Russian (CP866) instead of Hebrew/Arabic. |
 
 By default, `txt2oqt` looks for a UTF-8 BOM at the start of the input.
 If found, it switches to UTF-8 mode and consumes the BOM. If not
@@ -678,6 +855,26 @@ Note: U+0625 (Alef-Hamza-below) is mapped to CP864 0xC3
 (Alef-Hamza-above) because the embedded CP864 font does not contain a
 distinct glyph for the below variant. This is a closest-match
 fallback.
+
+### `/R` (Russian) mode
+
+Adds a Cyrillic + CP866-extras lookup that runs *before* the default
+Hebrew/Arabic resolution. With `/R`:
+
+| Input | Output |
+|---|---|
+| Cyrillic uppercase U+0410–U+042F | CP866 0x80–0x9F |
+| Cyrillic lowercase a..p (U+0430–U+043F) | CP866 0xA0–0xAF |
+| Cyrillic lowercase r..ya (U+0440–U+044F) | CP866 0xE0–0xEF |
+| Yo (U+0401 / U+0451) | CP866 0xF0 / 0xF1 |
+| Ukrainian Ye, Yi; Belarusian Short U | CP866 0xF2–0xF7 |
+| Box-drawing U+2500..U+25A0 | CP866 0xB0–0xDF (preserved exactly) |
+| Misc graphics tail (`°`, `∙`, `·`, `√`, `№`, `¤`, `■`, nbsp) | CP866 0xF8–0xFF |
+| Hebrew / Arabic codepoints | dropped |
+
+Order reversal in legacy DOS mode is also disabled under `/R` (Russian
+DOS files are always logical = visual since Russian is LTR). Combine
+with `/U` if your input lacks a UTF-8 BOM.
 
 ### Markdown formatting
 
@@ -720,6 +917,9 @@ txt2oqt /D oldfile.txt mydoc.txt
 
 # Legacy DOS file but keep visual order (open in OpenQT RTL mode)
 txt2oqt /D /V oldfile.txt mydoc.txt
+
+# Russian UTF-8 from LibreOffice -> OpenQT CP866 (open via OQTR)
+txt2oqt /R rusdoc-utf8.txt rusdoc.txt
 ```
 
 ---
@@ -785,7 +985,29 @@ The reorder logic is the inverse of OpenQT's BiDi pass.
 
 ## Version history
 
-### Version 3.2 (current)
+### Version 3.3 (current)
+
+- **Russian (CP866) input mode**. F4 now cycles English → Hebrew →
+  Arabic → Russian (and auto-flips the paragraph direction to match —
+  RTL for HEB / ARA, LTR for ENG / RUS, F5 still overrides). New
+  `RUSVGA.EXE` uploads a CP866 8x16 font (CP437 base extracted from
+  `HEBVGA.COM`, Cyrillic glyphs from the X11 `xfonts-base` 8x13 raster
+  font, padded into the VGA 8x16 cell). New `OQTR.BAT` launcher and
+  new `OPENQT /R` command-line flag. Russian is its own session — its
+  byte ranges overlap Hebrew + Arabic and cannot share the trilingual
+  screen font.
+- **Converter `/R` flag** on both `oqt2word` and `txt2oqt`. Required
+  for round-tripping Russian documents to/from UTF-8 — without it the
+  converters would mis-classify Cyrillic bytes as Hebrew or Arabic.
+  Box-drawing chars at 0xB0–0xDF round-trip as themselves under `/R`,
+  not as Arabic letters.
+- **BiDi engine** gates Arabic positional shaping behind
+  `input_lang != LANG_RUS` (otherwise Cyrillic bytes would be
+  shape-substituted into other CP866 bytes — typically box-drawing).
+  Russian text is treated as LTR regardless of `doc.rtl_mode` so a
+  document still in RTL mode displays Russian correctly.
+
+### Version 3.2
 
 - **Trilingual editing on one screen**. Hebrew, Arabic, and English
   can now coexist in the same document, on the same line, all visible

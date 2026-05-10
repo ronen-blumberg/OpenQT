@@ -1,9 +1,27 @@
 #!/usr/bin/env python3
-"""Generate OPENQT.HLP — trilingual docs in OpenQT mixed CP862+CP864 byte format.
+"""Generate OpenQT in-editor docs as a set of per-language .HLP files.
 
-Hebrew U+05D0..U+05EA  -> CP862 0x80..0x9A.
-Arabic basic block     -> CP864 abstract isolated-form bytes.
-ASCII                  -> passthrough.
+Why multiple files: a single .HLP can only contain text in scripts whose
+fonts are loaded simultaneously. Hebrew (CP862, 0x80-0x9A) and Arabic
+(CP864, 0xA0-0xFE) coexist under OQT 3 because their byte ranges are
+disjoint. Russian (CP866) overlaps both. So a unified quad-script file
+would render gibberish under any single-font session - half the page
+shows correct glyphs, the rest shows whatever bytes happen to land at
+those code points in the loaded font.
+
+Outputs:
+  OPENQT.HLP   - trilingual: English + Hebrew + Arabic. Targets OQT 3.
+                 Under OQTH/OQTA the section in the unloaded script
+                 still renders gibberish; the user can scroll past.
+  OPENQTH.HLP  - English + Hebrew only. Targets OQTH (no Arabic font).
+  OPENQTA.HLP  - English + Arabic only. Targets OQTA.
+  OPENQTR.HLP  - English + Russian only. Targets OQTR.
+
+Encoding rules:
+  Hebrew  U+05D0..U+05EA       -> CP862 0x80..0x9A.
+  Arabic  basic block          -> CP864 abstract isolated-form bytes.
+  Russian U+0410..U+044F + Yo  -> CP866 byte values.
+  ASCII                        -> passthrough.
 """
 
 ARABIC_MAP = {
@@ -21,7 +39,20 @@ ARABIC_MAP = {
 }
 
 
+def cyrillic_byte(cp: int) -> int:
+    """Map Cyrillic / CP866-extras codepoint to its CP866 byte. Returns 0 if not in CP866."""
+    if 0x0410 <= cp <= 0x042F: return 0x80 + (cp - 0x0410)   # А..Я
+    if 0x0430 <= cp <= 0x043F: return 0xA0 + (cp - 0x0430)   # а..п
+    if 0x0440 <= cp <= 0x044F: return 0xE0 + (cp - 0x0440)   # р..я
+    if cp == 0x0401: return 0xF0                              # Ё
+    if cp == 0x0451: return 0xF1                              # ё
+    if cp == 0x2116: return 0xFC                              # №
+    return 0
+
+
 def encode(text: str) -> bytes:
+    """UTF-8 -> OpenQT mixed CP862/CP864/CP866 bytes (single line should
+    contain at most one non-Latin script + ASCII)."""
     out = bytearray()
     for ch in text:
         cp = ord(ch)
@@ -34,23 +65,38 @@ def encode(text: str) -> bytes:
         elif cp in ARABIC_MAP:
             out.append(ARABIC_MAP[cp])
         elif cp in (0xFEF5, 0xFEF6, 0xFEF7, 0xFEF8, 0xFEF9, 0xFEFA, 0xFEFB, 0xFEFC):
-            out.append(0xF9)  # any lam-alef ligature -> CP864 0xF9
+            out.append(0xF9)
+        elif (b := cyrillic_byte(cp)):
+            out.append(b)
         else:
-            out.append(0x3F)  # '?'
+            out.append(0x3F)
     return bytes(out)
 
 
-CONTENT = """\
+def write_hlp(path: str, text: str) -> None:
+    blob = encode(text).replace(b'\n', b'\r\n')
+    with open(path, 'wb') as f:
+        f.write(blob)
+    print(f"Wrote {path} ({len(blob)} bytes)")
+
+
+# ---------------------------------------------------------------------------
+# Section pieces. Mix-and-match into the four output files below.
+# ---------------------------------------------------------------------------
+
+HEADER = """\
 ============================================================
-            OPENQT v3.2 - USER GUIDE
+            OPENQT v3.3.0 - USER GUIDE
 ============================================================
 
 ENGLISH GUIDE
 -------------
 
-OpenQT is a trilingual word processor for DOS that
-supports English, Hebrew and Arabic on one screen
-simultaneously. Press F4 to cycle between languages.
+OpenQT is a quadlingual word processor for DOS that
+supports English, Hebrew, Arabic, and Russian. The first
+three can mix on one screen via OQT 3; Russian (CP866)
+runs as its own session because its byte ranges overlap
+Hebrew + Arabic. Press F4 to cycle the input language.
 
 KEY COMMANDS:
   F1   Help            F2  Save           F3  Open
@@ -64,6 +110,7 @@ LAUNCHERS:
   OQT 3 file   Trilingual (Hebrew + Arabic + English)
   OQTH  file   Hebrew + English only
   OQTA  file   Arabic + English only
+  OQTR  file   Russian + English only (CP866, new in 3.3)
 
 ARABIC SHAPING (v3.2):
   Cursive joining is automatic. Letters connect to their
@@ -71,17 +118,35 @@ ARABIC SHAPING (v3.2):
   All four forms (isolated/initial/medial/final) used
   where available.
 
+RUSSIAN MODE (v3.3):
+  OQTR loads RUSVGA (CP866 font) and starts the editor in
+  Russian input mode. F4 still cycles all four languages,
+  but Russian text only renders right under RUSVGA - byte
+  ranges overlap CP862 Hebrew + CP864 Arabic, so a Russian
+  document cannot also contain Hebrew or Arabic letters.
+  Use OQT 3 for the Heb+Ara+Eng combo, OQTR for Russian.
+
 ENCRYPTION:
   File menu -> Save Encrypted -> enter password.
   Magic header OQT-ENC1 marks the file.
-  Same password unlocks; works for all three scripts.
+  Same password unlocks; works for all four scripts.
 
 CONVERTERS:
   oqt2word file.txt out.txt   OpenQT  -> UTF-8
+  oqt2word /R rus.txt out.txt CP866   -> UTF-8 (Russian)
   txt2oqt  utf8.txt  out.txt  UTF-8   -> OpenQT
+  txt2oqt /R utf8.txt out.txt UTF-8   -> CP866 (Russian)
   oqt2qt   file.txt  out.qt   OpenQT  -> QText 5.5
   qt2oqt   file.qt   out.txt  QText   -> OpenQT
 
+WHICH .HLP YOU ARE READING:
+  OPENQT.HLP    Heb + Ara + Eng (the OQT 3 trilingual guide)
+  OPENQTH.HLP   Heb + Eng (loaded automatically under OQTH)
+  OPENQTA.HLP   Ara + Eng (loaded automatically under OQTA)
+  OPENQTR.HLP   Rus + Eng (loaded automatically under OQTR)
+"""
+
+HEBREW_SECTION = """\
 
 מדריך בעברית
 ------------
@@ -103,7 +168,9 @@ CONVERTERS:
 חיפוש החלפה, ססמאות, בלוקים.
 
 לחזור למסמך הראשי הקש ESC.
+"""
 
+ARABIC_SECTION = """\
 
 دليل بالعربية
 -------------
@@ -125,16 +192,55 @@ CONVERTERS:
 دعم الارقام العربية والعلامات.
 
 اضغط ESC للعودة للمستند.
+"""
 
+RUSSIAN_SECTION = """\
+
+РУКОВОДСТВО НА РУССКОМ
+----------------------
+
+ОпенКьюТи это текстовый редактор для ДОС
+поддерживающий английский, иврит, арабский и
+русский. Русский язык работает в отдельной сессии
+запускаемой через ОКЬЮТР, потому что коды символов
+КП866 совпадают с диапазонами иврита и арабского.
+
+КЛАВИШИ:
+  F2 Сохранить        F3 Открыть
+  F4 Сменить язык     F5 Направление текста
+  F7 Поиск            F8 Замена
+  F9 Вставить блок    F10 Английский в РТЛ
+  Ctrl+B Жирный       Ctrl+U Подчеркнутый
+  Alt+X Выход
+
+ЗАПУСК:
+  ОКЬЮТР файл       Русский плюс английский (КП866)
+  Команда openqt /R  стартовать сразу в русской сессии
+
+КОНВЕРТЕРЫ:
+  oqt2word /R вход.txt utf8.txt
+  txt2oqt  /R utf8.txt вход.txt
+Флаг /R обязателен для русских документов так как
+байтовые диапазоны КП866 пересекаются с КП862 и КП864.
+
+Нажмите ESC для возврата в документ.
+"""
+
+FOOTER = """\
 
 ============================================================
 End of guide.   ESC closes.   See README.md for full details.
 ============================================================
 """
 
+
 if __name__ == "__main__":
-    blob = encode(CONTENT)
-    blob = blob.replace(b'\n', b'\r\n')
-    with open('/home/ronen/dos/eini2/OPENQT/OPENQT.HLP', 'wb') as f:
-        f.write(blob)
-    print(f"Wrote OPENQT.HLP ({len(blob)} bytes)")
+    base = '/home/ronen/dos/eini2/OPENQT/'
+    write_hlp(base + 'OPENQT.HLP',
+              HEADER + HEBREW_SECTION + ARABIC_SECTION + FOOTER)
+    write_hlp(base + 'OPENQTH.HLP',
+              HEADER + HEBREW_SECTION + FOOTER)
+    write_hlp(base + 'OPENQTA.HLP',
+              HEADER + ARABIC_SECTION + FOOTER)
+    write_hlp(base + 'OPENQTR.HLP',
+              HEADER + RUSSIAN_SECTION + FOOTER)

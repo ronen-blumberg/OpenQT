@@ -3,8 +3,14 @@
  * Converts OpenQT files to UTF-8 for Microsoft Word.
  *   - Hebrew letters (CP862, 0x80..0x9A) -> U+05D0..U+05EA
  *   - Arabic letters (CP864, 0xC1..0xDA, 0xE0..0xFE) -> U+0621.. (Arabic block)
+ *   - /R flag: file was written in OpenQT Russian mode (CP866). Cyrillic
+ *     letters -> U+0410..U+044F, Yo/Ye/Yi/Short-U -> their codepoints,
+ *     box-drawing -> U+2500.. block, No./currency -> U+2116/U+00A4.
+ *     CP866 byte ranges overlap CP862 Hebrew + CP864 Arabic, so this
+ *     flag is REQUIRED for Russian files - the converter cannot detect
+ *     the source codepage from byte values alone.
  *
- * Usage: oqt2word input.txt output.txt
+ * Usage: oqt2word [/R] input.txt output.txt
  *
  * Compile with Watcom: wcl386 -bt=dos -l=dos4g oqt2word.c -fe=oqt2word.exe
  */
@@ -161,6 +167,31 @@ static const unsigned int cp864_to_unicode[96] = {
 
 #define LAMALEF_PLAIN 0xFFFD  /* sentinel: 0xFE -> U+0644 + U+0627 */
 
+/* CP866 byte -> Unicode codepoint, full table for 0x80..0xFF.
+ * Used when /R is given so a CP866 byte stream can be decoded
+ * unambiguously (its high-byte ranges overlap both CP862 Hebrew at
+ * 0x80-0x9A and CP864 Arabic at 0xA0-0xFE). */
+static const unsigned int cp866_to_unicode[128] = {
+    /* 0x80 */ 0x0410, 0x0411, 0x0412, 0x0413, 0x0414, 0x0415, 0x0416, 0x0417,
+    /* 0x88 */ 0x0418, 0x0419, 0x041A, 0x041B, 0x041C, 0x041D, 0x041E, 0x041F,
+    /* 0x90 */ 0x0420, 0x0421, 0x0422, 0x0423, 0x0424, 0x0425, 0x0426, 0x0427,
+    /* 0x98 */ 0x0428, 0x0429, 0x042A, 0x042B, 0x042C, 0x042D, 0x042E, 0x042F,
+    /* 0xA0 */ 0x0430, 0x0431, 0x0432, 0x0433, 0x0434, 0x0435, 0x0436, 0x0437,
+    /* 0xA8 */ 0x0438, 0x0439, 0x043A, 0x043B, 0x043C, 0x043D, 0x043E, 0x043F,
+    /* 0xB0 */ 0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556,
+    /* 0xB8 */ 0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510,
+    /* 0xC0 */ 0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F,
+    /* 0xC8 */ 0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567,
+    /* 0xD0 */ 0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B,
+    /* 0xD8 */ 0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580,
+    /* 0xE0 */ 0x0440, 0x0441, 0x0442, 0x0443, 0x0444, 0x0445, 0x0446, 0x0447,
+    /* 0xE8 */ 0x0448, 0x0449, 0x044A, 0x044B, 0x044C, 0x044D, 0x044E, 0x044F,
+    /* 0xF0 */ 0x0401, 0x0451, 0x0404, 0x0454, 0x0407, 0x0457, 0x040E, 0x045E,
+    /* 0xF8 */ 0x00B0, 0x2219, 0x00B7, 0x221A, 0x2116, 0x00A4, 0x25A0, 0x00A0
+};
+
+static int g_russian_mode = 0;
+
 /* Write UTF-8 encoded character to buffer, return bytes written */
 int encode_utf8(unsigned char *buf, unsigned int codepoint)
 {
@@ -207,26 +238,40 @@ int main(int argc, char *argv[])
     int line_count = 0;
     unsigned char ch;
     unsigned int unicode;
-    
+    char *in_path = NULL, *out_path = NULL;
+
     printf("OQT2WORD - OpenQT to Word Converter\n");
     printf("===================================\n\n");
-    
-    if (argc != 3) {
-        printf("Usage: oqt2word input.txt output.txt\n\n");
+
+    for (i = 1; i < argc; i++) {
+        if ((argv[i][0] == '/' || argv[i][0] == '-') &&
+            (argv[i][1] == 'R' || argv[i][1] == 'r') && argv[i][2] == '\0') {
+            g_russian_mode = 1;
+        } else if (!in_path) {
+            in_path = argv[i];
+        } else if (!out_path) {
+            out_path = argv[i];
+        }
+    }
+
+    if (!in_path || !out_path) {
+        printf("Usage: oqt2word [/R] input.txt output.txt\n\n");
         printf("Converts OpenQT files to UTF-8 format for Microsoft Word.\n");
-        printf("Hebrew text will display correctly in Word.\n");
+        printf("Hebrew/Arabic text will display correctly in Word.\n\n");
+        printf("  /R   input file is OpenQT Russian (CP866) - use this for\n");
+        printf("       any document created in OQTR / OQT R / openqt /R mode.\n");
         return 1;
     }
-    
-    fin = fopen(argv[1], "rb");
+
+    fin = fopen(in_path, "rb");
     if (!fin) {
-        printf("Error: Cannot open input file '%s'\n", argv[1]);
+        printf("Error: Cannot open input file '%s'\n", in_path);
         return 1;
     }
-    
-    fout = fopen(argv[2], "wb");
+
+    fout = fopen(out_path, "wb");
     if (!fout) {
-        printf("Error: Cannot create output file '%s'\n", argv[2]);
+        printf("Error: Cannot create output file '%s'\n", out_path);
         fclose(fin);
         return 1;
     }
@@ -236,7 +281,8 @@ int main(int argc, char *argv[])
     fputc(0xBB, fout);
     fputc(0xBF, fout);
     
-    printf("Converting '%s' to '%s'...\n", argv[1], argv[2]);
+    printf("Mode: %s\n", g_russian_mode ? "Russian (CP866)" : "Hebrew + Arabic");
+    printf("Converting '%s' to '%s'...\n", in_path, out_path);
     
     while (fgets((char *)line, sizeof(line), fin)) {
         len = strlen((char *)line);
@@ -256,7 +302,18 @@ int main(int argc, char *argv[])
                 continue;
             }
             
-            if (is_hebrew(ch)) {
+            if (g_russian_mode) {
+                if (ch >= 0x80) {
+                    /* CP866: every high byte has a Unicode equivalent
+                     * (Cyrillic letter, box-drawing, or graphics). */
+                    unicode = cp866_to_unicode[ch - 0x80];
+                    if (unicode) out_pos += encode_utf8(output + out_pos, unicode);
+                } else if (ch >= 32 && ch < 128) {
+                    output[out_pos++] = ch;                /* ASCII */
+                } else if (ch == '\t') {
+                    output[out_pos++] = '\t';
+                }
+            } else if (is_hebrew(ch)) {
                 /* Convert CP862 Hebrew to Unicode */
                 unicode = cp862_to_unicode[ch - 0x80];
                 out_pos += encode_utf8(output + out_pos, unicode);
@@ -295,7 +352,7 @@ int main(int argc, char *argv[])
     fclose(fout);
     
     printf("Converted %d lines.\n", line_count);
-    printf("Open '%s' in Microsoft Word.\n", argv[2]);
+    printf("Open '%s' in Microsoft Word.\n", out_path);
     
     return 0;
 }

@@ -1,0 +1,3 @@
+@ECHO OFF
+RUSVGA
+OPENQT /R %1 %2 %3

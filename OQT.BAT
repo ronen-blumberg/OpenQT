@@ -9,13 +9,16 @@ REM separately:
 REM
 REM   OQT H file.txt   == Hebrew + English (HEBVGA)
 REM   OQT A file.txt   == Arabic + English (ARABVGA, /A flag for ASCII boxes)
-REM   OQT 3 file.txt   == tri-script (requires rebuilt ARABVGA with /P)
+REM   OQT R file.txt   == Russian + English (RUSVGA, /R flag for Russian start)
+REM   OQT 3 file.txt   == tri-script Hebrew+Arabic+English (requires ARABVGA /P)
 REM   OQT   file.txt   == defaults to Hebrew (legacy behavior)
 
 IF "%1"=="H" GOTO HEB
 IF "%1"=="h" GOTO HEB
 IF "%1"=="A" GOTO ARA
 IF "%1"=="a" GOTO ARA
+IF "%1"=="R" GOTO RUS
+IF "%1"=="r" GOTO RUS
 IF "%1"=="3" GOTO TRI
 
 REM --- default: Hebrew ---
@@ -33,6 +36,12 @@ GOTO END
 ARABVGA
 SHIFT
 OPENQT /A %1 %2 %3
+GOTO END
+
+:RUS
+RUSVGA
+SHIFT
+OPENQT /R %1 %2 %3
 GOTO END
 
 :TRI

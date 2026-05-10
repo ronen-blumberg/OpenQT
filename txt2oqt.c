@@ -13,23 +13,30 @@
  *   - ASCII passes through. UTF-8 BOM is stripped.
  *   - Logical order is assumed (LibreOffice/Word save logical).
  *
+ * /R flag: target is OpenQT Russian (CP866). Cyrillic, Yo/Ye/Yi/Short-U,
+ * box-drawing and the CP866-specific tail (No., currency, etc.) are
+ * mapped to their CP866 byte values; Hebrew/Arabic codepoints are
+ * dropped. Use this when bringing a Russian UTF-8 document back into
+ * OpenQT for editing in OQTR mode.
+ *
  * Markdown formatting markers in the input are translated to OpenQT
  * inline format toggle bytes:
  *     **bold**       -> 0x02 ... 0x02 (FMT_BOLD toggle)
  *     __underline__  -> 0x03 ... 0x03 (FMT_UNDERLINE toggle)
  *
  * Legacy DOS mode (/D flag, or no UTF-8 BOM detected): input is
- * already CP862/CP864 encoded. Visual order is reversed to logical
- * unless /V is given. This is the original txt2oqt behavior, now
- * extended to recognize Arabic CP864 letters in addition to Hebrew.
+ * already CP862/CP864 (or CP866 with /R) encoded. Visual order is
+ * reversed to logical unless /V is given. CP866 (Russian) DOS files
+ * are LTR-only - no order reversal is applied even without /V.
  *
  * Compile (Watcom, DOS4GW):
  *     wcl386 -bt=dos -l=dos4g txt2oqt.c -fe=txt2oqt.exe
  *
- * Usage: txt2oqt <input.txt> <output.txt> [/V] [/D] [/U]
+ * Usage: txt2oqt <input.txt> <output.txt> [/V] [/D] [/U] [/R]
  *     /V   keep visual order (legacy DOS mode only)
  *     /D   force legacy DOS encoding mode
  *     /U   force UTF-8 mode (skip BOM detection)
+ *     /R   target OpenQT Russian (CP866) instead of Hebrew/Arabic
  *
  * by Ronen Blumberg
  */
@@ -52,6 +59,7 @@
 static int keep_visual = 0;
 static int force_dos   = 0;
 static int force_utf8  = 0;
+static int russian_mode = 0;
 static int input_is_utf8 = 1;   /* default mode */
 
 /* ========================================================================
@@ -178,6 +186,57 @@ static unsigned char unicode_to_cp864(unsigned int cp)
     return 0;
 }
 
+/* Cyrillic + CP866-specific symbols -> CP866 byte. Returns 0 if not in CP866. */
+static unsigned char unicode_to_cp866(unsigned int cp)
+{
+    /* Cyrillic uppercase A..YA */
+    if (cp >= 0x0410 && cp <= 0x042F) return (unsigned char)(0x80 + (cp - 0x0410));
+    /* Cyrillic lowercase a..p (split: 0xA0..0xAF for first half, 0xE0..0xEF for second) */
+    if (cp >= 0x0430 && cp <= 0x043F) return (unsigned char)(0xA0 + (cp - 0x0430));
+    if (cp >= 0x0440 && cp <= 0x044F) return (unsigned char)(0xE0 + (cp - 0x0440));
+    /* Yo */
+    if (cp == 0x0401) return 0xF0;
+    if (cp == 0x0451) return 0xF1;
+    /* Ukrainian Ye, Yi; Belarusian Short U */
+    if (cp == 0x0404) return 0xF2;
+    if (cp == 0x0454) return 0xF3;
+    if (cp == 0x0407) return 0xF4;
+    if (cp == 0x0457) return 0xF5;
+    if (cp == 0x040E) return 0xF6;
+    if (cp == 0x045E) return 0xF7;
+    /* CP866 graphics tail */
+    if (cp == 0x00B0) return 0xF8;
+    if (cp == 0x2219) return 0xF9;
+    if (cp == 0x00B7) return 0xFA;
+    if (cp == 0x221A) return 0xFB;
+    if (cp == 0x2116) return 0xFC;
+    if (cp == 0x00A4) return 0xFD;
+    if (cp == 0x25A0) return 0xFE;
+    if (cp == 0x00A0) return 0xFF;
+    /* Box drawing: cover the canonical Unicode codepoints used at
+     * CP866/CP437 0xB0..0xDF. Picky one-by-one rather than a range
+     * because Unicode's box-drawing block isn't ordered the same way. */
+    switch (cp) {
+        case 0x2591: return 0xB0; case 0x2592: return 0xB1; case 0x2593: return 0xB2;
+        case 0x2502: return 0xB3; case 0x2524: return 0xB4; case 0x2561: return 0xB5;
+        case 0x2562: return 0xB6; case 0x2556: return 0xB7; case 0x2555: return 0xB8;
+        case 0x2563: return 0xB9; case 0x2551: return 0xBA; case 0x2557: return 0xBB;
+        case 0x255D: return 0xBC; case 0x255C: return 0xBD; case 0x255B: return 0xBE;
+        case 0x2510: return 0xBF; case 0x2514: return 0xC0; case 0x2534: return 0xC1;
+        case 0x252C: return 0xC2; case 0x251C: return 0xC3; case 0x2500: return 0xC4;
+        case 0x253C: return 0xC5; case 0x255E: return 0xC6; case 0x255F: return 0xC7;
+        case 0x255A: return 0xC8; case 0x2554: return 0xC9; case 0x2569: return 0xCA;
+        case 0x2566: return 0xCB; case 0x2560: return 0xCC; case 0x2550: return 0xCD;
+        case 0x256C: return 0xCE; case 0x2567: return 0xCF; case 0x2568: return 0xD0;
+        case 0x2564: return 0xD1; case 0x2565: return 0xD2; case 0x2559: return 0xD3;
+        case 0x2558: return 0xD4; case 0x2552: return 0xD5; case 0x2553: return 0xD6;
+        case 0x256B: return 0xD7; case 0x256A: return 0xD8; case 0x2518: return 0xD9;
+        case 0x250C: return 0xDA; case 0x2588: return 0xDB; case 0x2584: return 0xDC;
+        case 0x258C: return 0xDD; case 0x2590: return 0xDE; case 0x2580: return 0xDF;
+    }
+    return 0;
+}
+
 /* ========================================================================
  * UTF-8 decoder
  * ======================================================================== */
@@ -247,6 +306,11 @@ static int convert_utf8_line(const unsigned char *in, int in_len,
 
         if (cp < 0x80) {
             out[op++] = (unsigned char)cp;                    /* ASCII */
+        } else if (russian_mode) {
+            if ((b = unicode_to_cp866((unsigned int)cp)) != 0) {
+                out[op++] = b;                                /* Russian */
+            }
+            /* else: codepoint not representable in CP866 — skip. */
         } else if ((b = unicode_to_cp862((unsigned int)cp)) != 0) {
             out[op++] = b;                                    /* Hebrew */
         } else if ((b = unicode_to_cp864((unsigned int)cp)) != 0) {
@@ -277,10 +341,17 @@ static void reverse_range(unsigned char *buf, int s, int e)
 
 /* Reverse the line, then re-reverse non-RTL runs to put English/digits
  * back in LTR order. Mirrors the original txt2oqt logic, but accepts
- * Arabic CP864 bytes alongside Hebrew CP862. */
+ * Arabic CP864 bytes alongside Hebrew CP862.
+ *
+ * Russian is LTR (CP866 is not flipped on disk in OpenQT) - this
+ * function returns immediately when russian_mode is on. The
+ * is_dos_rtl predicate would also misclassify Cyrillic letters as
+ * RTL because their byte values overlap CP862/CP864. */
 static void dos_visual_to_logical(unsigned char *line, int len)
 {
     int i, run_start, has_rtl = 0;
+
+    if (russian_mode) return;
 
     for (i = 0; i < len; i++) {
         if (is_dos_rtl(line[i])) { has_rtl = 1; break; }
@@ -377,10 +448,13 @@ static void process_file(const char *in_file, const char *out_file)
         input_is_utf8 = detect_utf8_bom(fin);
     }
 
-    printf("Mode: %s\n", input_is_utf8 ? "UTF-8" : "Legacy DOS");
+    printf("Mode:   %s%s\n",
+           input_is_utf8 ? "UTF-8" : "Legacy DOS",
+           russian_mode  ? " (target CP866 Russian)" : "");
     if (!input_is_utf8) {
-        printf("Order: %s\n", keep_visual ? "Visual (preserved)"
-                                          : "Visual -> Logical");
+        printf("Order:  %s\n", russian_mode ? "Logical (Russian is LTR)"
+                              : keep_visual ? "Visual (preserved)"
+                              :                "Visual -> Logical");
     }
     printf("Wrap:  %d columns\n\n", TEXT_WIDTH);
 
@@ -414,7 +488,13 @@ static void process_file(const char *in_file, const char *out_file)
     printf("Input:  %d lines\n", input_lines);
     printf("Output: %d lines\n", line_count);
     if (input_is_utf8) {
-        printf("\nOpen in OpenQT (Hebrew via OQTH, Arabic via OQTA).\n");
+        if (russian_mode) {
+            printf("\nOpen in OpenQT via OQTR (Russian / CP866).\n");
+        } else {
+            printf("\nOpen in OpenQT (Hebrew via OQTH, Arabic via OQTA).\n");
+        }
+    } else if (russian_mode) {
+        printf("\nOpen in OpenQT via OQTR (Russian, no order reversal).\n");
     } else if (keep_visual) {
         printf("\nOpen in OpenQT with RTL mode ON (F5).\n");
     } else {
@@ -437,23 +517,27 @@ int main(int argc, char *argv[])
             if      (c == 'V' || c == 'v') keep_visual = 1;
             else if (c == 'D' || c == 'd') force_dos   = 1;
             else if (c == 'U' || c == 'u') force_utf8  = 1;
+            else if (c == 'R' || c == 'r') russian_mode = 1;
         } else if (!in_file)  in_file  = argv[i];
         else  if (!out_file)  out_file = argv[i];
     }
 
     if (!in_file || !out_file) {
-        printf("Usage: txt2oqt <input.txt> <output.txt> [/V] [/D] [/U]\n\n");
+        printf("Usage: txt2oqt <input.txt> <output.txt> [/V] [/D] [/U] [/R]\n\n");
         printf("Default: auto-detects UTF-8 (via BOM) vs legacy DOS encoding.\n\n");
         printf("Options:\n");
         printf("  /V   Keep visual order (legacy DOS mode only)\n");
         printf("  /D   Force legacy DOS encoding mode\n");
-        printf("  /U   Force UTF-8 mode (skip BOM auto-detect)\n\n");
+        printf("  /U   Force UTF-8 mode (skip BOM auto-detect)\n");
+        printf("  /R   Target OpenQT Russian (CP866) instead of Hebrew/Arabic\n\n");
         printf("UTF-8 mode handles:\n");
         printf("  - Hebrew  (U+05D0..U+05EA)\n");
         printf("  - Arabic  (basic block, digits, punctuation, ligatures)\n");
+        printf("  - Russian (Cyrillic + Yo + box-drawing) with /R\n");
         printf("  - English (ASCII passthrough)\n");
         printf("  - Markdown formatting:  **bold**  __underline__\n\n");
-        printf("Legacy DOS mode handles CP862 Hebrew + CP864 Arabic.\n");
+        printf("Legacy DOS mode handles CP862 Hebrew + CP864 Arabic; with /R\n");
+        printf("treats input as CP866 (no order reversal - Russian is LTR).\n");
         return 1;
     }
 

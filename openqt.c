@@ -1,7 +1,16 @@
 /*
- * OpenQT - Open Source Hebrew/English/Arabic Word Processor
+ * OpenQT - Open Source Hebrew/English/Arabic/Russian Word Processor
  * A QText 5.5 Clone for DOS
- * Version 3.2
+ * Version 3.3.0
+ *
+ * Changes in 3.3:
+ *   - Russian (CP866) input mode added. F4 cycle is now ENG -> HEB ->
+ *     ARA -> RUS. New RUSVGA.EXE uploads a CP866 8x16 font (CP437 base
+ *     from HEBVGA + Cyrillic from X11 fixed-misc 8x13). Russian is its
+ *     own session - CP866 byte ranges conflict with CP862 Hebrew at
+ *     0x80-0x9A and CP864 Arabic at 0xA0-0xFE, so RUSVGA does not
+ *     overlay; OQTR/OQT R is a Russian+English-only session. New /R
+ *     command-line flag starts the editor in Russian mode.
  *
  * Changes in 3.2:
  *   - Full 4-form Arabic positional shaping. Yeh, Ain, Ghain, Heh
@@ -24,7 +33,8 @@
  * Launchers:
  *   OQTH file.txt   -> loads Hebrew VGA font (HEBVGA.COM), then runs OpenQT
  *   OQTA file.txt   -> loads Arabic VGA font (ARABVGA + VIDEO.CPI), then runs OpenQT
- *   OQT  H file.txt -> dispatcher form (H=Hebrew, A=Arabic)
+ *   OQTR file.txt   -> loads Russian VGA font (RUSVGA.EXE, CP866), then runs OpenQT
+ *   OQT  H file.txt -> dispatcher form (H=Hebrew, A=Arabic, R=Russian, 3=trilingual)
  *
  * Encoding:
  *   - English/ASCII : CP437 (0x00-0x7F)
@@ -36,7 +46,7 @@
  *   menu drawing to ASCII when input_lang==LANG_ARA.
  *
  * Features:
- *   - 3-language input (English / Hebrew / Arabic) — F4 cycles
+ *   - 4-language input (English / Hebrew / Arabic / Russian) — F4 cycles
  *   - Full BiDi support (Hebrew + Arabic + English + Numbers)
  *   - Bold, Underline formatting
  *   - Undo/Redo (250 levels)
@@ -61,7 +71,7 @@
 #include <time.h>
 #include <direct.h>
 
-#define VERSION         "3.0"
+#define VERSION         "3.3.0"
 #define MAX_LINES       30000  /* ~500 pages */
 #define MAX_LINE_LEN    256
 #define SAVE_REMIND_SEC 600   /* Save reminder interval in seconds (600 = 10 min) */
@@ -170,6 +180,8 @@
 #define LANG_ENG        0
 #define LANG_HEB        1
 #define LANG_ARA        2
+#define LANG_RUS        3
+#define LANG_COUNT      4
 
 /* BiDi character types */
 #define BIDI_R          0
@@ -216,6 +228,30 @@ static unsigned char arab_map[128] = {
 };
 
 static unsigned char heb_final[256];
+
+/* Russian keyboard mapping - standard JCUKEN layout (the layout printed on
+ * Soviet/Russian PC keycaps). Each US-QWERTY key maps to a CP866 byte for
+ * the corresponding Cyrillic letter. Both letter cases are mapped (Russian
+ * has case, unlike Hebrew/Arabic). The two non-letter swaps follow the
+ * traditional Russian-DOS layout: '/' -> '.', '?' -> ',', and Shift+`
+ * gives capital Yo. CP866 letters: uppercase A..YA at 0x80..0x9F, lowercase
+ * a..p at 0xA0..0xAF, lowercase r..ya at 0xE0..0xEF, Yo/yo at 0xF0/0xF1.
+ *
+ *   q->Й r->К t->Е u->Г o->Щ      a->Ф s->Ы d->В f->А g->П h->Р j->О
+ *   w->Ц e->У y->Н i->Ш p->З      k->Л l->Д ;->ж '->э
+ *   [->Х ]->Ъ                     z->Я x->Ч c->С v->М b->И n->Т m->Ь
+ *   `->ё ~->Ё ,->б .->ю /->. ?->,
+ */
+static unsigned char rus_map[128] = {
+    /* 0x00 */ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    /* 0x10 */ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    /* 0x20 */ ' ','!',0x9D,'#','$','%','&',0xED,'(',')','*','+',0xA1,'-',0xEE,'.',
+    /* 0x30 */ '0','1','2','3','4','5','6','7','8','9',0x86,0xA6,0x81,'=',0x9E,',',
+    /* 0x40 */ '@',0x94,0x88,0x91,0x82,0x93,0x80,0x8F,0x90,0x98,0x8E,0x8B,0x84,0x9C,0x92,0x99,
+    /* 0x50 */ 0x87,0x89,0x8A,0x9B,0x85,0x83,0x8C,0x96,0x97,0x8D,0x9F,0xE5,'\\',0xEA,'^','_',
+    /* 0x60 */ 0xF1,0xE4,0xA8,0xE1,0xA2,0xE3,0xA0,0xAF,0xE0,0xE8,0xAE,0xAB,0xA4,0xEC,0xE2,0xE9,
+    /* 0x70 */ 0xA7,0xA9,0xAA,0xEB,0xA5,0xA3,0xAC,0xE6,0xE7,0xAD,0xEF,0x95,'|',0x9A,0xF0,0
+};
 
 /* Arabic shaping tables (filled by init_arabic_shaping).
  * arab_join[b] :  0 = does not join (space, punct, English, non-Arabic)
@@ -265,7 +301,7 @@ typedef struct {
     int scroll_x;
     int scroll_y;
     int insert_mode;
-    int input_lang;        /* LANG_ENG / LANG_HEB / LANG_ARA */
+    int input_lang;        /* LANG_ENG / LANG_HEB / LANG_ARA / LANG_RUS */
     int rtl_mode;
     int embedded_ltr;
     int word_wrap;
@@ -295,6 +331,11 @@ static int running = 1;
  * overwrites CP437 box-drawing glyphs at 0xB0..0xDF. We fall back to ASCII
  * pseudo-boxes (-, |, +) so menus and dialogs stay legible. */
 static int g_ascii_boxes = 0;
+/* Set when launched via OQTR / "/R" — RUSVGA loaded the CP866 font; the
+ * editor starts in Russian (LTR) input mode so the user can type
+ * immediately. CP866 keeps CP437 box-drawing intact at 0xB0..0xDF, so no
+ * ASCII-box fallback is needed. */
+static int g_russian_start = 0;
 #define MAX_UNDO        250
 
 /* Undo/Redo system */
@@ -628,6 +669,12 @@ unsigned char translate_arabic(unsigned char ch)
     return ch;
 }
 
+unsigned char translate_russian(unsigned char ch)
+{
+    if (ch < 128) return rus_map[ch];
+    return ch;
+}
+
 int is_hebrew_char(unsigned char ch)
 {
     return (ch >= HEB_FIRST && ch <= HEB_LAST);
@@ -731,10 +778,20 @@ void bidi_reorder(const char *logical, int len)
 
     /* Arabic positional shaping (display-only, in logical order). Lines
      * with no Arabic letters are unaffected. Length-preserving so
-     * clean_attrs[] alignment is kept. */
-    shape_arabic_inplace(clean, clean_len);
+     * clean_attrs[] alignment is kept.
+     *
+     * Skipped in Russian sessions: CP866 Cyrillic at 0xA0-0xEF overlaps
+     * CP864 Arabic letter bytes, so without this gate the shaping table
+     * would rewrite Cyrillic letters into other CP866 bytes (often
+     * 0xB0-0xDF box-drawing). */
+    if (doc.input_lang != LANG_RUS) {
+        shape_arabic_inplace(clean, clean_len);
+    }
 
-    if (!doc.rtl_mode) {
+    /* Russian is LTR regardless of doc.rtl_mode - CP866 bytes do not
+     * carry script info, so the BiDi classifier (which only knows
+     * Hebrew + Arabic ranges) would mis-flag Cyrillic as RTL. */
+    if (!doc.rtl_mode || doc.input_lang == LANG_RUS) {
         /* LTR mode: copy as-is */
         for (i = 0; i < clean_len; i++) {
             bidi.visual[i] = clean[i];
@@ -1327,6 +1384,8 @@ void draw_menu_bar(void)
     } else if (doc.input_lang == LANG_ARA) {
         if (doc.embedded_ltr) strcpy(mode_str, "[ARA+ENG]");
         else strcpy(mode_str, "[Arabic]");
+    } else if (doc.input_lang == LANG_RUS) {
+        strcpy(mode_str, "[Russian]");
     } else {
         strcpy(mode_str, "[English]");
     }
@@ -1488,7 +1547,8 @@ void draw_status_bar(void)
             doc.insert_mode ? "INS" : "OVR",
             doc.rtl_mode ? "RTL" : "LTR",
             (doc.input_lang == LANG_HEB) ? "HEB" :
-            (doc.input_lang == LANG_ARA) ? "ARA" : "ENG",
+            (doc.input_lang == LANG_ARA) ? "ARA" :
+            (doc.input_lang == LANG_RUS) ? "RUS" : "ENG",
             doc.embedded_ltr ? "+E" : "",
             doc.block_active ? " BLK" : "",
             doc.encrypted ? " ENC" : "");
@@ -1922,7 +1982,16 @@ void ctrl_end(void) {
 }
 
 void toggle_insert(void) { doc.insert_mode = !doc.insert_mode; show_cursor(doc.insert_mode); draw_status_bar(); }
-void cycle_input_lang(void) { doc.input_lang = (doc.input_lang + 1) % 3; doc.embedded_ltr = 0; draw_menu_bar(); draw_status_bar(); }
+void cycle_input_lang(void) {
+    doc.input_lang = (doc.input_lang + 1) % LANG_COUNT;
+    doc.embedded_ltr = 0;
+    /* Auto-set paragraph direction to match the new language so F4 alone
+     * is enough to flip into a usable Russian (or English) session. The
+     * user can still override with F5. */
+    doc.rtl_mode = (doc.input_lang == LANG_HEB || doc.input_lang == LANG_ARA);
+    doc.scroll_x = 0;
+    draw_screen();
+}
 void toggle_embedded_ltr(void) { if (is_rtl_input()) { doc.embedded_ltr = !doc.embedded_ltr; draw_menu_bar(); draw_status_bar(); } }
 void toggle_rtl(void) { doc.rtl_mode = !doc.rtl_mode; doc.scroll_x = 0; draw_screen(); }
 void toggle_wrap(void) { doc.word_wrap = !doc.word_wrap; }
@@ -2073,7 +2142,7 @@ int input_dialog(const char *title, const char *prompt, char *buffer, int maxlen
         }
         else if (key >= 32 && key < 256 && len < maxlen - 1) {
             ch = (unsigned char)key;
-            /* Translate to active RTL script (Hebrew or Arabic) */
+            /* Translate to active script (Hebrew, Arabic, or Russian) */
             if (doc.input_lang == LANG_HEB) {
                 if (ch >= 32 && ch < 128 && !(ch >= '0' && ch <= '9')) {
                     unsigned char m = translate_hebrew(ch);
@@ -2082,6 +2151,11 @@ int input_dialog(const char *title, const char *prompt, char *buffer, int maxlen
             } else if (doc.input_lang == LANG_ARA) {
                 if (ch >= 32 && ch < 128 && !(ch >= '0' && ch <= '9')) {
                     unsigned char m = translate_arabic(ch);
+                    if (m) ch = m;
+                }
+            } else if (doc.input_lang == LANG_RUS) {
+                if (ch >= 32 && ch < 128 && !(ch >= '0' && ch <= '9')) {
+                    unsigned char m = translate_russian(ch);
                     if (m) ch = m;
                 }
             }
@@ -2169,7 +2243,8 @@ int search_dialog(const char *title, const char *prompt, char *buffer, int maxle
         /* Show current mode and F4 hint */
         sprintf(mode_str, "[%s] F4",
                 (search_lang == LANG_HEB) ? "HEB" :
-                (search_lang == LANG_ARA) ? "ARA" : "ENG");
+                (search_lang == LANG_ARA) ? "ARA" :
+                (search_lang == LANG_RUS) ? "RUS" : "ENG");
         write_string(x2 - 12, y1 + 2, mode_str, CLR_DIALOG);
         
         /* Display text field with BiDi reordering */
@@ -2203,7 +2278,7 @@ int search_dialog(const char *title, const char *prompt, char *buffer, int maxle
             if (ext_key == KEY_HOME) pos = 0; 
             if (ext_key == KEY_END) pos = len; 
             if (ext_key == KEY_DELETE && pos < len) memmove(buffer + pos, buffer + pos + 1, len - pos);
-            if (ext_key == KEY_F4) search_lang = (search_lang + 1) % 3;  /* Cycle ENG->HEB->ARA */
+            if (ext_key == KEY_F4) search_lang = (search_lang + 1) % LANG_COUNT;  /* Cycle ENG->HEB->ARA->RUS */
         }
         else if (key >= 32 && key < 256 && len < maxlen - 1) {
             ch = (unsigned char)key;
@@ -2216,6 +2291,11 @@ int search_dialog(const char *title, const char *prompt, char *buffer, int maxle
             } else if (search_lang == LANG_ARA) {
                 if (ch >= 32 && ch < 128 && !(ch >= '0' && ch <= '9')) {
                     unsigned char m = translate_arabic(ch);
+                    if (m) ch = m;
+                }
+            } else if (search_lang == LANG_RUS) {
+                if (ch >= 32 && ch < 128 && !(ch >= '0' && ch <= '9')) {
+                    unsigned char m = translate_russian(ch);
                     if (m) ch = m;
                 }
             }
@@ -2516,7 +2596,7 @@ void show_help(void)
             write_string(x1 + 2, y1 + 11, "  Block menu: Alt+B (Copy/Move/Delete)", CLR_DIALOG);
             
             write_string(x1 + 2, y1 + 13, "SEARCH & REPLACE:", CLR_DIALOG);
-            write_string(x1 + 2, y1 + 14, "  F7      - Find text (F4 cycles ENG/HEB/ARA)", CLR_DIALOG);
+            write_string(x1 + 2, y1 + 14, "  F7      - Find text (F4 cycles ENG/HEB/ARA/RUS)", CLR_DIALOG);
             write_string(x1 + 2, y1 + 15, "  F8      - Replace text", CLR_DIALOG);
             write_string(x1 + 2, y1 + 16, "  Search menu: Alt+S (Find Next/Prev, Replace All)", CLR_DIALOG);
             
@@ -2524,7 +2604,7 @@ void show_help(void)
         }
         else if (page == 3) {
             write_string(x1 + 2, y1 + 2, "LANGUAGES & BIDI:", CLR_DIALOG);
-            write_string(x1 + 2, y1 + 3, "  F4   - Cycle keyboard: English -> Hebrew -> Arabic", CLR_DIALOG);
+            write_string(x1 + 2, y1 + 3, "  F4   - Cycle keyboard: English -> Hebrew -> Arabic -> Russian", CLR_DIALOG);
             write_string(x1 + 2, y1 + 4, "  F5   - Toggle RTL/LTR paragraph direction", CLR_DIALOG);
             write_string(x1 + 2, y1 + 5, "  F10  - Embedded English (type English in RTL mode)", CLR_DIALOG);
             write_string(x1 + 2, y1 + 6, "  Numbers always display correctly (123, not 321)", CLR_DIALOG);
@@ -2616,17 +2696,50 @@ void show_docs(void)
     int row_width    = x2 - x1 - 2;
     int saved_rtl;
 
-    /* Look in current dir, then parent, then a couple of common
-     * locations. Helps when the editor is launched from a subdir
-     * like ARABIC\ or when the .HLP wasn't copied alongside files. */
-    fp = fopen("OPENQT.HLP", "rb");
-    if (!fp) fp = fopen("..\\OPENQT.HLP", "rb");
-    if (!fp) fp = fopen("\\OPENQT\\OPENQT.HLP", "rb");
-    if (!fp) fp = fopen("C:\\OPENQT\\OPENQT.HLP", "rb");
+    /* Pick the .HLP that matches the currently-loaded VGA font, since
+     * a single file can't render Hebrew, Arabic, and Russian under
+     * one font (byte ranges overlap). Each launcher's session font
+     * has a matching .HLP; OPENQT.HLP is the trilingual fallback used
+     * by OQT 3 and by English/default mode.
+     *
+     * Try the language-specific file in cwd, parent, and the usual
+     * well-known DOS locations BEFORE falling back to OPENQT.HLP -
+     * otherwise an OQTH/OQTA session launched from C:\ would never
+     * find OPENQTH.HLP / OPENQTA.HLP in C:\OPENQT\ and would
+     * incorrectly fall through to the trilingual file. */
+    {
+        const char *primary = "OPENQT.HLP";
+        char path[64];
+        switch (doc.input_lang) {
+            case LANG_HEB: primary = "OPENQTH.HLP"; break;
+            case LANG_ARA: primary = "OPENQTA.HLP"; break;
+            case LANG_RUS: primary = "OPENQTR.HLP"; break;
+            default: break;     /* LANG_ENG -> trilingual OPENQT.HLP */
+        }
+        fp = fopen(primary, "rb");
+        if (!fp) {
+            sprintf(path, "..\\%s", primary);
+            fp = fopen(path, "rb");
+        }
+        if (!fp) {
+            sprintf(path, "\\OPENQT\\%s", primary);
+            fp = fopen(path, "rb");
+        }
+        if (!fp) {
+            sprintf(path, "C:\\OPENQT\\%s", primary);
+            fp = fopen(path, "rb");
+        }
+        /* Last resort: trilingual OPENQT.HLP at any of those paths. */
+        if (!fp) fp = fopen("OPENQT.HLP", "rb");
+        if (!fp) fp = fopen("..\\OPENQT.HLP", "rb");
+        if (!fp) fp = fopen("\\OPENQT\\OPENQT.HLP", "rb");
+        if (!fp) fp = fopen("C:\\OPENQT\\OPENQT.HLP", "rb");
+    }
     if (!fp) {
         show_dialog("Docs",
-            "OPENQT.HLP not found. Tried current dir, parent, and "
-            "\\OPENQT\\. In DOSBox try `rescan` to refresh the cache.");
+            "OPENQT*.HLP not found. Tried language-specific name, "
+            "OPENQT.HLP, parent, and \\OPENQT\\. In DOSBox try "
+            "`rescan` to refresh the cache.");
         return;
     }
     while (num_lines < 200 && fgets(tmp, sizeof(tmp), fp)) {
@@ -2649,7 +2762,14 @@ void show_docs(void)
     doc.rtl_mode = 1;
 
     while (1) {
-        draw_box(x1, y1, x2, y2, CLR_DIALOG, " OpenQT Docs - Trilingual Guide ");
+        const char *title;
+        switch (doc.input_lang) {
+            case LANG_HEB: title = " OpenQT Docs - Hebrew + English ";  break;
+            case LANG_ARA: title = " OpenQT Docs - Arabic + English ";  break;
+            case LANG_RUS: title = " OpenQT Docs - Russian + English "; break;
+            default:       title = " OpenQT Docs - Trilingual Guide ";  break;
+        }
+        draw_box(x1, y1, x2, y2, CLR_DIALOG, title);
 
         for (i = 0; i < visible_rows; i++) {
             int row = y1 + 1 + i;
@@ -2995,7 +3115,7 @@ void show_search_menu(void) { int x1 = 12, y1 = 1, w = 20, h = 8, sel = 0, key, 
 
 void show_block_menu(void) { int x1 = 21, y1 = 1, w = 18, h = 8, sel = 0, key, i; const char *items[] = {"Start Block F6","End Block","Copy Block","Move Block","Delete Block","Unmark Block"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 6; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 5; } if (key == KEY_DOWN) { sel++; if (sel > 5) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_search_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_options_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: start_block(); break; case 1: end_block(); break; case 2: copy_block(); break; case 3: cut_block(); paste_block(); break; case 4: delete_block(); break; case 5: unselect_block(); break; } return; } } draw_screen(); }
 
-void show_options_menu(void) { int x1 = 29, y1 = 1, w = 22, h = 10, sel = 0, key, i; char items[8][25]; const char *langname; while (1) { langname = (doc.input_lang == LANG_HEB) ? "Hebrew" : (doc.input_lang == LANG_ARA) ? "Arabic" : "English"; sprintf(items[0], "Lang: %-7s    F4", langname); sprintf(items[1], "[%c] Embed English F10", doc.embedded_ltr ? 'X' : ' '); sprintf(items[2], "[%c] RTL Mode       F5", doc.rtl_mode ? 'X' : ' '); sprintf(items[3], "[%c] Word Wrap", doc.word_wrap ? 'X' : ' '); sprintf(items[4], "[%c] Show Ruler", doc.show_ruler ? 'X' : ' '); sprintf(items[5], "[%c] Insert Mode   Ins", doc.insert_mode ? 'X' : ' '); sprintf(items[6], "[%c] Save Reminder 10m", doc.save_reminder ? 'X' : ' '); strcpy(items[7], "----------------------"); draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 6; } while (sel == 7); } if (key == KEY_DOWN) { do { sel++; if (sel > 6) sel = 0; } while (sel == 7); } if (key == KEY_LEFT) { draw_screen(); show_block_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_tools_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER || key == ' ') { switch (sel) { case 0: cycle_input_lang(); break; case 1: toggle_embedded_ltr(); break; case 2: toggle_rtl(); break; case 3: toggle_wrap(); break; case 4: doc.show_ruler = !doc.show_ruler; draw_screen(); break; case 5: toggle_insert(); break; case 6: toggle_save_reminder(); break; } } } draw_screen(); }
+void show_options_menu(void) { int x1 = 29, y1 = 1, w = 22, h = 10, sel = 0, key, i; char items[8][25]; const char *langname; while (1) { langname = (doc.input_lang == LANG_HEB) ? "Hebrew" : (doc.input_lang == LANG_ARA) ? "Arabic" : (doc.input_lang == LANG_RUS) ? "Russian" : "English"; sprintf(items[0], "Lang: %-7s    F4", langname); sprintf(items[1], "[%c] Embed English F10", doc.embedded_ltr ? 'X' : ' '); sprintf(items[2], "[%c] RTL Mode       F5", doc.rtl_mode ? 'X' : ' '); sprintf(items[3], "[%c] Word Wrap", doc.word_wrap ? 'X' : ' '); sprintf(items[4], "[%c] Show Ruler", doc.show_ruler ? 'X' : ' '); sprintf(items[5], "[%c] Insert Mode   Ins", doc.insert_mode ? 'X' : ' '); sprintf(items[6], "[%c] Save Reminder 10m", doc.save_reminder ? 'X' : ' '); strcpy(items[7], "----------------------"); draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 6; } while (sel == 7); } if (key == KEY_DOWN) { do { sel++; if (sel > 6) sel = 0; } while (sel == 7); } if (key == KEY_LEFT) { draw_screen(); show_block_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_tools_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER || key == ' ') { switch (sel) { case 0: cycle_input_lang(); break; case 1: toggle_embedded_ltr(); break; case 2: toggle_rtl(); break; case 3: toggle_wrap(); break; case 4: doc.show_ruler = !doc.show_ruler; draw_screen(); break; case 5: toggle_insert(); break; case 6: toggle_save_reminder(); break; } } } draw_screen(); }
 
 void show_tools_menu(void) { int x1 = 37, y1 = 1, w = 18, h = 5, sel = 0, key, i; const char *items[] = {"Word Count","Go To Line","Insert Date/Time"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 3; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 2; } if (key == KEY_DOWN) { sel++; if (sel > 2) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_options_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_help_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: word_count(); break; case 1: goto_line(); break; case 2: insert_date_time(); break; } return; } } draw_screen(); }
 
@@ -3092,9 +3212,12 @@ void process_key(int key, int extended)
                         } else if (doc.input_lang == LANG_ARA) {
                             unsigned char m = translate_arabic(ch);
                             if (m) ch = m;
+                        } else if (doc.input_lang == LANG_RUS) {
+                            unsigned char m = translate_russian(ch);
+                            if (m) ch = m;
                         }
                     }
-                    
+
                     insert_char(ch);
                     /* Only redraw current line instead of full screen */
                     {
@@ -3142,12 +3265,17 @@ int main(int argc, char *argv[])
     char *file_arg = NULL;
 
     /* Argument parse: /A or -A switches to Arabic mode + ASCII boxes
-     * (used by OQTA.BAT after running ARABVGA). The first non-flag
-     * argument is treated as the file to open. */
+     * (used by OQTA.BAT after running ARABVGA). /R or -R starts in
+     * Russian mode (used by OQTR.BAT after running RUSVGA - CP866 keeps
+     * CP437 box-drawing intact, so no ASCII fallback is needed). The
+     * first non-flag argument is treated as the file to open. */
     for (i = 1; i < argc; i++) {
         if ((argv[i][0] == '/' || argv[i][0] == '-') &&
             (argv[i][1] == 'A' || argv[i][1] == 'a') && argv[i][2] == '\0') {
             g_ascii_boxes = 1;
+        } else if ((argv[i][0] == '/' || argv[i][0] == '-') &&
+            (argv[i][1] == 'R' || argv[i][1] == 'r') && argv[i][2] == '\0') {
+            g_russian_start = 1;
         } else if (file_arg == NULL) {
             file_arg = argv[i];
         }
@@ -3155,6 +3283,7 @@ int main(int argc, char *argv[])
 
     init_editor();
     if (g_ascii_boxes) doc.input_lang = LANG_ARA;
+    if (g_russian_start) { doc.input_lang = LANG_RUS; doc.rtl_mode = 0; }
     if (file_arg) load_file(file_arg);
     draw_screen();
     

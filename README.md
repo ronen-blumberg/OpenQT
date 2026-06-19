@@ -13,7 +13,7 @@ trilingual screen font.
 
 > **Author:** Ronen Blumberg  
 > **License:** Public Domain  
-> **Current version:** OpenQT 3.3.0  
+> **Current version:** OpenQT 3.4.0  
 > **Platform:** Real-mode 16-bit DOS, or 32-bit DOS via DOS4GW (bundled).
 
 ---
@@ -27,6 +27,7 @@ trilingual screen font.
   - [Launchers](#launchers)
   - [Trilingual mode (Hebrew + Arabic + English)](#trilingual-mode-hebrew--arabic--english)
   - [Russian mode](#russian-mode)
+  - [Host-assisted features (speech, spell check, translation)](#host-assisted-features-speech-spell-check-translation)
   - [Keyboard reference](#keyboard-reference)
   - [Docs viewer (Help → Docs…)](#docs-viewer-help--docs)
   - [Hebrew typing layout](#hebrew-typing-layout)
@@ -59,6 +60,7 @@ trilingual screen font.
 | `make_rusvga.py` | Helper script that regenerates `rusvga.c` (combines HEBVGA's CP437 base with Cyrillic glyphs from the Linux X11 8x13 font). |
 | `OPENQT.HLP`, `OPENQTH.HLP`, `OPENQTA.HLP`, `OPENQTR.HLP` | Per-language user guides loaded by the in-editor Docs viewer (Alt+H → Docs). Each one is plain text in OpenQT's mixed-codepage byte format, matched to a single VGA font. The viewer auto-picks the file that matches the active input language so every byte renders correctly. |
 | `make_hlp.py` | Helper script that regenerates the four `*.HLP` files from a single UTF-8 source (Unicode → OpenQT byte mapping). |
+| `host_helper/` | Linux-host daemon that powers the Tools-menu speech / spell-check / translation features. New in 3.4. See [Host-assisted features](#host-assisted-features-speech-spell-check-translation). |
 | `HEBVGA.COM` | Uploads CP862 Hebrew font into VGA character generator. |
 | `OQT.BAT`, `OQTH.BAT`, `OQTA.BAT`, `OQTR.BAT` | Launchers (see below). |
 | `DOS4GW.EXE` | DOS extender for 32-bit builds. |
@@ -392,6 +394,33 @@ Arabic, LTR for English / Russian. F5 still overrides manually.
   inserting Russian into a Hebrew/Arabic document via byte-paste won't
   round-trip — the converter `/R` flag is the right route for taking
   Russian text out to UTF-8.
+
+### Host-assisted features (speech, spell check, translation)
+
+New in 3.4. Four items in the **Tools** menu (**Alt+T**) hand work off to a
+small helper program running on the Linux host, because DOS itself has no
+microphone input, no speech engine, and no modern network access:
+
+| Tools item | What it does | Engine (host) |
+|---|---|---|
+| **Spell Check (Eng)** | Walks the English words in the selection (or whole document), highlights each unknown word, and offers numbered suggestions — press **1–9** to replace, **S** to skip, **Esc** to stop. | `aspell` |
+| **Read Aloud** | Speaks the selection (or whole document) through the host's speakers. The voice follows the current input language (F4): English, Hebrew, Arabic, or Russian. | `espeak-ng` |
+| **Stop Speech** | Stops playback. | — |
+| **Translate to Hebrew** | Translates English text (selection or document) and inserts the Hebrew at the cursor. **Needs an internet connection.** | online MT |
+| **Dictate (Speech)** | Records from the host microphone (Enter to transcribe, Esc to cancel) and inserts the recognised English text at the cursor. | `whisper` |
+
+**To use them, start the helper on the host first** and leave it running in its
+own terminal, then launch OpenQT as usual:
+
+```bash
+./host_helper/run_helper.sh
+```
+
+The editor and the helper exchange files in `C:\OPENQT\BRIDGE`; all the
+encoding conversion happens on the host, so your documents keep OpenQT's normal
+byte format. If the helper isn't running, those four menu items simply report
+"Helper not responding" and the rest of the editor is unaffected. Full setup
+and details are in [`host_helper/README.md`](host_helper/README.md).
 
 ### Keyboard reference
 
@@ -985,7 +1014,22 @@ The reorder logic is the inverse of OpenQT's BiDi pass.
 
 ## Version history
 
-### Version 3.3 (current)
+### Version 3.4 (current)
+
+- **Host-assisted language features** in the Tools menu (Alt+T):
+  English spell check, Read Aloud, Stop Speech, Translate to Hebrew,
+  and Dictate (speech-to-text). These run on the Linux/DOSBox host via
+  a helper daemon (`host_helper/`) — the microphone, speakers, speech
+  engine, and network all live host-side, which is what makes
+  dictation and real translation possible at all from a DOS program.
+  The editor talks to the daemon through a file handshake in
+  `C:\OPENQT\BRIDGE`; all UTF-8 conversion is done host-side, so
+  `openqt.c` still only ever handles its native CP862/CP864/CP866
+  bytes. The features are inert (no errors, just a "Helper not
+  responding" notice) when the daemon isn't running. See
+  [Host-assisted features](#host-assisted-features-speech-spell-check-translation).
+
+### Version 3.3
 
 - **Russian (CP866) input mode**. F4 now cycles English → Hebrew →
   Arabic → Russian (and auto-flips the paragraph direction to match —

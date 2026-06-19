@@ -1,7 +1,16 @@
 /*
  * OpenQT - Open Source Hebrew/English/Arabic/Russian Word Processor
  * A QText 5.5 Clone for DOS
- * Version 3.3.0
+ * Version 3.4.0
+ *
+ * Changes in 3.4:
+ *   - Host-assisted language features in the Tools menu (Alt+T), bridged to
+ *     a Linux/DOSBox host daemon (host_helper/oqt_helper.py): English spell
+ *     check (aspell, interactive), Read Aloud (espeak-ng), Stop Speech,
+ *     Translate to Hebrew (online), and Dictate/speech-to-text (whisper).
+ *     The editor exchanges raw OpenQT bytes with the daemon through files in
+ *     C:\OPENQT\BRIDGE; all UTF-8 conversion happens host-side. Features are
+ *     inert (show "Helper not responding") when the daemon isn't running.
  *
  * Changes in 3.3:
  *   - Russian (CP866) input mode added. F4 cycle is now ENG -> HEB ->
@@ -71,7 +80,7 @@
 #include <time.h>
 #include <direct.h>
 
-#define VERSION         "3.3.0"
+#define VERSION         "3.4.0"
 #define MAX_LINES       30000  /* ~500 pages */
 #define MAX_LINE_LEN    256
 #define SAVE_REMIND_SEC 600   /* Save reminder interval in seconds (600 = 10 min) */
@@ -152,6 +161,14 @@
 #define KEY_CTRL_B      2
 #define KEY_ALT_L       38
 #define KEY_ALT_B_FMT   48
+
+/* Host helper bridge (speech/spell/translate via the Linux host daemon).
+ * Paths are absolute on the DOSBox C: mount (c: = /home/ronen/dos/eini2). */
+#define BRIDGE_REQ_TMP  "C:\\OPENQT\\BRIDGE\\REQ.TMP"
+#define BRIDGE_REQ      "C:\\OPENQT\\BRIDGE\\REQ.TXT"
+#define BRIDGE_RESP     "C:\\OPENQT\\BRIDGE\\RESP.TXT"
+#define BRIDGE_BUF      16384
+#define ASSIST_MAX_FIND 300
 
 /* Text formatting styles */
 #define STYLE_NORMAL    0
@@ -410,6 +427,18 @@ int load_file_encrypted(const char *filename, const char *password);
 int is_file_encrypted(const char *filename);
 int save_with_password(void);
 int remove_password(void);
+/* Host helper bridge + language-assist features */
+int bridge_request(const char *cmd, const char *lang, const char *payload,
+                   int plen, char *resp, int rmax, int timeout_sec);
+const char *bridge_err(int code, const char *resp);
+const char *cur_lang_hint(void);
+int gather_doc_text(char *buf, int maxlen);
+void show_busy(const char *msg);
+void assist_read_aloud(void);
+void assist_stop_speech(void);
+void assist_translate(void);
+void assist_spell_check(void);
+void assist_dictate(void);
 
 char *stristr(const char *haystack, const char *needle)
 {
@@ -3105,6 +3134,387 @@ int file_dialog(const char *title, char *filename, int maxlen, int save_mode)
     return result;
 }
 
+/* =========== Host Helper Bridge =========== */
+
+/* Round-trip a request through the host daemon. Writes a request file the
+ * daemon picks up and polls the response file it writes back. Returns the
+ * length of the response payload (>=0) on success; on success 'resp' holds
+ * the raw payload bytes (NUL-terminated). Negative returns:
+ *   -1 cannot access bridge folder   -2 user cancelled (ESC)
+ *   -3 timed out (daemon not running) -4 daemon returned ERR (msg in resp) */
+int bridge_request(const char *cmd, const char *lang, const char *payload,
+                   int plen, char *resp, int rmax, int timeout_sec)
+{
+    FILE *fp;
+    time_t start;
+    int n, ok_status, plen2;
+    char *eof, *nl;
+
+    /* 1. pre-create the response file so its directory entry is cached by
+     *    DOSBox before the daemon overwrites the contents in place. */
+    fp = fopen(BRIDGE_RESP, "wb");
+    if (!fp) return -1;
+    fputs("WAIT\n", fp);
+    fclose(fp);
+
+    /* 2. write the request to a temp name then rename, so the daemon never
+     *    reads a half-written request. */
+    fp = fopen(BRIDGE_REQ_TMP, "wb");
+    if (!fp) return -1;
+    fprintf(fp, "%s\n%s\n---\n", cmd, lang);
+    if (payload && plen > 0) fwrite(payload, 1, plen, fp);
+    fclose(fp);
+    remove(BRIDGE_REQ);
+    rename(BRIDGE_REQ_TMP, BRIDGE_REQ);
+
+    /* 3. poll the response file for the .EOF. completion sentinel. */
+    start = time(NULL);
+    while (1) {
+        if (kbhit()) {
+            int k = getch();
+            if (k == 0 || k == 0xE0) getch();
+            else if (k == KEY_ESC) return -2;
+        }
+        fp = fopen(BRIDGE_RESP, "rb");
+        if (fp) {
+            n = fread(resp, 1, rmax - 1, fp);
+            fclose(fp);
+            if (n < 0) n = 0;
+            resp[n] = '\0';
+            eof = strstr(resp, "\n.EOF.");
+            if (eof) {
+                *eof = '\0';                 /* drop sentinel */
+                nl = strchr(resp, '\n');     /* end of status line */
+                if (!nl) return -1;
+                ok_status = (strncmp(resp, "OK", 2) == 0);
+                plen2 = (int)(eof - (nl + 1));
+                memmove(resp, nl + 1, plen2 + 1);
+                if (!ok_status) return -4;
+                return plen2;
+            }
+        }
+        if ((long)(time(NULL) - start) > timeout_sec) return -3;
+        delay(150);
+    }
+}
+
+const char *bridge_err(int code, const char *resp)
+{
+    if (code == -1) return "Bridge folder missing. Start host_helper/run_helper.sh.";
+    if (code == -3) return "Helper not responding. Is the host daemon running?";
+    if (code == -4) return resp;             /* ERR message from the daemon */
+    return "Helper error.";
+}
+
+const char *cur_lang_hint(void)
+{
+    if (doc.input_lang == LANG_HEB) return "HE";
+    if (doc.input_lang == LANG_ARA) return "AR";
+    if (doc.input_lang == LANG_RUS) return "RU";
+    return "EN";
+}
+
+/* Copy the active block (if any) else the whole document into 'buf' as raw
+ * OpenQT bytes, lines separated by '\n'. Returns the byte count. */
+int gather_doc_text(char *buf, int maxlen)
+{
+    int i, n = 0, len, by1, by2, bx1, bx2, s, e, j;
+    char *src;
+    if (doc.block_active &&
+        !(doc.block_start_x == doc.block_end_x &&
+          doc.block_start_y == doc.block_end_y)) {
+        by1 = doc.block_start_y < doc.block_end_y ? doc.block_start_y : doc.block_end_y;
+        by2 = doc.block_start_y > doc.block_end_y ? doc.block_start_y : doc.block_end_y;
+        if (doc.block_start_y == doc.block_end_y) {
+            bx1 = doc.block_start_x < doc.block_end_x ? doc.block_start_x : doc.block_end_x;
+            bx2 = doc.block_start_x > doc.block_end_x ? doc.block_start_x : doc.block_end_x;
+        } else if (doc.block_start_y < doc.block_end_y) {
+            bx1 = doc.block_start_x; bx2 = doc.block_end_x;
+        } else { bx1 = doc.block_end_x; bx2 = doc.block_start_x; }
+        for (i = by1; i <= by2 && n < maxlen - 2; i++) {
+            src = doc.lines[i]; if (!src) src = "";
+            len = strlen(src);
+            s = (i == by1) ? bx1 : 0;
+            e = (i == by2) ? bx2 : len;
+            if (e > len) e = len;
+            while (s < e && n < maxlen - 2) buf[n++] = src[s++];
+            if (i < by2) buf[n++] = '\n';
+        }
+    } else {
+        for (i = 0; i < doc.num_lines && n < maxlen - 2; i++) {
+            src = doc.lines[i]; if (!src) src = "";
+            len = strlen(src);
+            for (j = 0; j < len && n < maxlen - 2; j++) buf[n++] = src[j];
+            buf[n++] = '\n';
+        }
+    }
+    buf[n] = '\0';
+    return n;
+}
+
+/* Non-blocking centered "working" notice (erased by the next draw_screen). */
+void show_busy(const char *msg)
+{
+    int w = strlen(msg) + 6, x1, y1;
+    if (w < 24) w = 24;
+    if (w > 70) w = 70;
+    x1 = (SCREEN_WIDTH - w) / 2;
+    y1 = SCREEN_HEIGHT / 2 - 1;
+    draw_box(x1, y1, x1 + w - 1, y1 + 2, CLR_DIALOG, "Helper");
+    write_string(x1 + 3, y1 + 1, msg, CLR_DIALOG);
+    hide_cursor();
+}
+
+void assist_read_aloud(void)
+{
+    char *payload, resp[512];
+    int plen, r;
+    payload = (char *)malloc(BRIDGE_BUF);
+    if (!payload) { show_dialog("Read Aloud", "Out of memory."); return; }
+    plen = gather_doc_text(payload, BRIDGE_BUF);
+    if (plen <= 0) { free(payload); show_dialog("Read Aloud", "Nothing to read."); return; }
+    show_busy("Speaking... (audio plays on host)");
+    r = bridge_request("TTS", cur_lang_hint(), payload, plen, resp, sizeof(resp), 30);
+    free(payload);
+    if (r < 0 && r != -2) show_dialog("Read Aloud", bridge_err(r, resp));
+    draw_screen();
+}
+
+void assist_stop_speech(void)
+{
+    char resp[256];
+    bridge_request("TTSSTOP", "EN", NULL, 0, resp, sizeof(resp), 10);
+    draw_screen();
+}
+
+void assist_translate(void)
+{
+    char *payload, *resp;
+    int plen, r, i, save_ins;
+    payload = (char *)malloc(BRIDGE_BUF);
+    resp = (char *)malloc(BRIDGE_BUF);
+    if (!payload || !resp) { free(payload); free(resp); show_dialog("Translate", "Out of memory."); return; }
+    plen = gather_doc_text(payload, BRIDGE_BUF);
+    if (plen <= 0) { free(payload); free(resp); show_dialog("Translate", "Nothing to translate."); return; }
+    show_busy("Translating to Hebrew...");
+    r = bridge_request("XLATE", "EN", payload, plen, resp, BRIDGE_BUF, 45);
+    if (r < 0) {
+        if (r != -2) show_dialog("Translate", bridge_err(r, resp));
+        free(payload); free(resp); draw_screen(); return;
+    }
+    save_ins = doc.insert_mode; doc.insert_mode = 1;
+    for (i = 0; i < r; i++) {
+        if (resp[i] == '\n') insert_line();
+        else insert_char((unsigned char)resp[i]);
+    }
+    doc.insert_mode = save_ins;
+    free(payload); free(resp);
+    draw_screen();
+    show_dialog("Translate", "Hebrew translation inserted at cursor.");
+}
+
+/* --- interactive spell check --- */
+typedef struct { int line; int col; char word[48]; char sugg[480]; } SpellFind;
+
+static int spell_nth_sugg(const char *suggs, int n, char *out, int max)
+{
+    const char *p = suggs;
+    int idx = 1, l;
+    const char *c;
+    while (*p) {
+        c = strchr(p, ',');
+        l = c ? (int)(c - p) : (int)strlen(p);
+        if (idx == n) {
+            if (l > max - 1) l = max - 1;
+            memcpy(out, p, l); out[l] = '\0';
+            return 1;
+        }
+        idx++;
+        if (!c) break;
+        p = c + 1;
+    }
+    return 0;
+}
+
+/* Returns: -1 stop, 0 skip, 1..9 chosen suggestion number. */
+static int spell_prompt(const char *word, const char *suggs)
+{
+    char items[9][40], hdr[64], ln[48];
+    int nsug = 0, i, key, x1, y1, w, h, l;
+    const char *p = suggs, *c;
+    while (*p && nsug < 9) {
+        c = strchr(p, ',');
+        l = c ? (int)(c - p) : (int)strlen(p);
+        if (l > 38) l = 38;
+        memcpy(items[nsug], p, l); items[nsug][l] = '\0';
+        nsug++;
+        if (!c) break;
+        p = c + 1;
+    }
+    w = 44; h = nsug + 6;
+    x1 = (SCREEN_WIDTH - w) / 2; y1 = 2;
+    draw_box(x1, y1, x1 + w - 1, y1 + h - 1, CLR_DIALOG, "Spell Check");
+    sprintf(hdr, "Not in dictionary: %.20s", word);
+    write_string(x1 + 2, y1 + 1, hdr, CLR_DIALOG);
+    for (i = 0; i < nsug; i++) {
+        sprintf(ln, " %d. %s", i + 1, items[i]);
+        write_string(x1 + 2, y1 + 3 + i, ln, CLR_DIALOG);
+    }
+    if (nsug == 0) write_string(x1 + 2, y1 + 3, " (no suggestions)", CLR_DIALOG);
+    write_string(x1 + 2, y1 + h - 2, "1-9=replace  S=skip  Esc=stop", CLR_DIALOG_BTN);
+    hide_cursor();
+    while (1) {
+        key = getch();
+        if (key == 0 || key == 0xE0) { getch(); continue; }
+        if (key == KEY_ESC) return -1;
+        if (key == 'S' || key == 's' || key == KEY_ENTER) return 0;
+        if (key >= '1' && key <= '9') { int nn = key - '0'; if (nn <= nsug) return nn; }
+    }
+}
+
+/* Replace oldlen bytes at (ln,col) with newstr, using the cursor edit path so
+ * the change is undoable. */
+static void spell_replace(int ln, int col, int oldlen, const char *newstr)
+{
+    char *line = doc.lines[ln];
+    int len, nlen, i, save;
+    if (!line) return;
+    len = strlen(line);
+    if (col > len) return;
+    if (col + oldlen > len) oldlen = len - col;
+    nlen = strlen(newstr);
+    if (len - oldlen + nlen >= MAX_LINE_LEN - 1) return;
+    doc.cursor_y = ln; doc.cursor_x = col;
+    save = doc.insert_mode; doc.insert_mode = 1;
+    for (i = 0; i < oldlen; i++) delete_char();
+    for (i = 0; i < nlen; i++) insert_char((unsigned char)newstr[i]);
+    doc.insert_mode = save;
+    doc.modified = 1;
+}
+
+void assist_spell_check(void)
+{
+    char *payload, *resp;
+    SpellFind *finds;
+    int plen, r, nf = 0, i, j, corrected = 0;
+    char *p, *eol, *t2, *t3, *t4, repl[48], msg[80];
+    SpellFind tmp;
+
+    payload = (char *)malloc(BRIDGE_BUF);
+    resp = (char *)malloc(BRIDGE_BUF);
+    finds = (SpellFind *)malloc(sizeof(SpellFind) * ASSIST_MAX_FIND);
+    if (!payload || !resp || !finds) {
+        free(payload); free(resp); free(finds);
+        show_dialog("Spell Check", "Out of memory."); return;
+    }
+    plen = gather_doc_text(payload, BRIDGE_BUF);
+    if (plen <= 0) { free(payload); free(resp); free(finds); show_dialog("Spell Check", "Nothing to check."); return; }
+    show_busy("Checking spelling...");
+    r = bridge_request("SPELL", "EN", payload, plen, resp, BRIDGE_BUF, 30);
+    if (r < 0) {
+        if (r != -2) show_dialog("Spell Check", bridge_err(r, resp));
+        free(payload); free(resp); free(finds); draw_screen(); return;
+    }
+    /* parse "SPELL N\n" header then N tab-delimited records */
+    p = strchr(resp, '\n');
+    if (p) p++;
+    while (p && *p && nf < ASSIST_MAX_FIND) {
+        eol = strchr(p, '\n');
+        if (eol) *eol = '\0';
+        t2 = strchr(p, '\t');
+        if (t2) {
+            *t2++ = '\0';
+            t3 = strchr(t2, '\t');
+            if (t3) {
+                *t3++ = '\0';
+                t4 = strchr(t3, '\t');
+                if (t4) *t4++ = '\0'; else t4 = "";
+                finds[nf].line = atoi(p);
+                finds[nf].col = atoi(t2);
+                strncpy(finds[nf].word, t3, sizeof(finds[nf].word) - 1);
+                finds[nf].word[sizeof(finds[nf].word) - 1] = '\0';
+                strncpy(finds[nf].sugg, t4, sizeof(finds[nf].sugg) - 1);
+                finds[nf].sugg[sizeof(finds[nf].sugg) - 1] = '\0';
+                nf++;
+            }
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+    if (nf == 0) { free(payload); free(resp); free(finds); show_dialog("Spell Check", "No spelling errors found."); return; }
+    /* sort by line ascending, column descending: same-line edits keep earlier
+     * columns valid after later (rightward) replacements. */
+    for (i = 0; i < nf - 1; i++)
+        for (j = 0; j < nf - 1 - i; j++)
+            if (finds[j].line > finds[j + 1].line ||
+                (finds[j].line == finds[j + 1].line && finds[j].col < finds[j + 1].col)) {
+                tmp = finds[j]; finds[j] = finds[j + 1]; finds[j + 1] = tmp;
+            }
+    for (i = 0; i < nf; i++) {
+        int ln = finds[i].line, col = finds[i].col, wlen = strlen(finds[i].word), act;
+        if (ln < 0 || ln >= doc.num_lines) continue;
+        doc.cursor_y = ln; doc.cursor_x = col;
+        if (doc.cursor_y < doc.scroll_y) doc.scroll_y = doc.cursor_y;
+        if (doc.cursor_y >= doc.scroll_y + EDIT_HEIGHT) doc.scroll_y = doc.cursor_y - EDIT_HEIGHT + 1;
+        doc.block_active = 1;
+        doc.block_start_y = ln; doc.block_start_x = col;
+        doc.block_end_y = ln; doc.block_end_x = col + wlen;
+        draw_screen();
+        act = spell_prompt(finds[i].word, finds[i].sugg);
+        if (act == -1) break;
+        if (act >= 1 && spell_nth_sugg(finds[i].sugg, act, repl, sizeof(repl))) {
+            spell_replace(ln, col, wlen, repl);
+            corrected++;
+        }
+    }
+    doc.block_active = 0;
+    draw_screen();
+    sprintf(msg, "Spell check done: %d corrected of %d flagged.", corrected, nf);
+    free(payload); free(resp); free(finds);
+    show_dialog("Spell Check", msg);
+}
+
+void assist_dictate(void)
+{
+    char *resp;
+    int r, key, i, save_ins, x1, y1, w;
+    resp = (char *)malloc(BRIDGE_BUF);
+    if (!resp) { show_dialog("Dictate", "Out of memory."); return; }
+    show_busy("Starting microphone...");
+    r = bridge_request("RECSTART", cur_lang_hint(), NULL, 0, resp, BRIDGE_BUF, 15);
+    if (r < 0) { show_dialog("Dictate", bridge_err(r, resp)); free(resp); return; }
+    /* wait for the user to stop or cancel recording */
+    w = 50; x1 = (SCREEN_WIDTH - w) / 2; y1 = SCREEN_HEIGHT / 2 - 1;
+    draw_box(x1, y1, x1 + w - 1, y1 + 3, CLR_DIALOG, "Dictation");
+    write_string(x1 + 2, y1 + 1, "Recording... speak now.", CLR_DIALOG);
+    write_string(x1 + 2, y1 + 2, "Enter = transcribe    Esc = cancel", CLR_DIALOG_BTN);
+    hide_cursor();
+    while (1) {
+        key = getch();
+        if (key == 0 || key == 0xE0) { getch(); continue; }
+        if (key == KEY_ENTER) break;
+        if (key == KEY_ESC) {
+            bridge_request("RECCANCEL", "EN", NULL, 0, resp, BRIDGE_BUF, 15);
+            free(resp); draw_screen(); return;
+        }
+    }
+    show_busy("Transcribing speech...");
+    r = bridge_request("RECSTOP", cur_lang_hint(), NULL, 0, resp, BRIDGE_BUF, 300);
+    if (r < 0) {
+        if (r != -2) show_dialog("Dictate", bridge_err(r, resp));
+        free(resp); draw_screen(); return;
+    }
+    if (r == 0) { show_dialog("Dictate", "No speech recognized."); free(resp); return; }
+    save_ins = doc.insert_mode; doc.insert_mode = 1;
+    for (i = 0; i < r; i++) {
+        if (resp[i] == '\n') insert_line();
+        else insert_char((unsigned char)resp[i]);
+    }
+    doc.insert_mode = save_ins;
+    free(resp);
+    draw_screen();
+}
+
 /* =========== Menu Functions =========== */
 
 void show_file_menu(void) { int x1 = 0, y1 = 1, w = 22, h = 12, sel = 0, key, i; char fn[256]; const char *items[] = {"New","Open          F3","Save          F2","Save As...","Save Encrypted...","Remove Password...","Print","----------------------","Exit       Alt+X"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 9; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 8; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 8) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_help_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_edit_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: new_document(); break; case 1: fn[0] = '\0'; if (file_dialog("Open File", fn, sizeof(fn), 0)) load_file(fn); draw_screen(); break; case 2: if (doc.encrypted) save_file_encrypted(doc.filename, doc.password); else save_file(doc.filename); draw_screen(); break; case 3: save_file_as(); draw_screen(); break; case 4: save_with_password(); draw_screen(); break; case 5: remove_password(); draw_screen(); break; case 6: print_document(); break; case 8: running = 0; break; } return; } } draw_screen(); }
@@ -3117,7 +3527,7 @@ void show_block_menu(void) { int x1 = 21, y1 = 1, w = 18, h = 8, sel = 0, key, i
 
 void show_options_menu(void) { int x1 = 29, y1 = 1, w = 22, h = 10, sel = 0, key, i; char items[8][25]; const char *langname; while (1) { langname = (doc.input_lang == LANG_HEB) ? "Hebrew" : (doc.input_lang == LANG_ARA) ? "Arabic" : (doc.input_lang == LANG_RUS) ? "Russian" : "English"; sprintf(items[0], "Lang: %-7s    F4", langname); sprintf(items[1], "[%c] Embed English F10", doc.embedded_ltr ? 'X' : ' '); sprintf(items[2], "[%c] RTL Mode       F5", doc.rtl_mode ? 'X' : ' '); sprintf(items[3], "[%c] Word Wrap", doc.word_wrap ? 'X' : ' '); sprintf(items[4], "[%c] Show Ruler", doc.show_ruler ? 'X' : ' '); sprintf(items[5], "[%c] Insert Mode   Ins", doc.insert_mode ? 'X' : ' '); sprintf(items[6], "[%c] Save Reminder 10m", doc.save_reminder ? 'X' : ' '); strcpy(items[7], "----------------------"); draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 6; } while (sel == 7); } if (key == KEY_DOWN) { do { sel++; if (sel > 6) sel = 0; } while (sel == 7); } if (key == KEY_LEFT) { draw_screen(); show_block_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_tools_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER || key == ' ') { switch (sel) { case 0: cycle_input_lang(); break; case 1: toggle_embedded_ltr(); break; case 2: toggle_rtl(); break; case 3: toggle_wrap(); break; case 4: doc.show_ruler = !doc.show_ruler; draw_screen(); break; case 5: toggle_insert(); break; case 6: toggle_save_reminder(); break; } } } draw_screen(); }
 
-void show_tools_menu(void) { int x1 = 37, y1 = 1, w = 18, h = 5, sel = 0, key, i; const char *items[] = {"Word Count","Go To Line","Insert Date/Time"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 3; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 2; } if (key == KEY_DOWN) { sel++; if (sel > 2) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_options_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_help_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: word_count(); break; case 1: goto_line(); break; case 2: insert_date_time(); break; } return; } } draw_screen(); }
+void show_tools_menu(void) { int x1 = 37, y1 = 1, w = 24, h = 11, sel = 0, key, i; const char *items[] = {"Word Count","Go To Line","Insert Date/Time","----------------------","Spell Check (Eng)","Read Aloud","Stop Speech","Translate to Hebrew","Dictate (Speech)"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 9; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 8; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 8) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_options_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_help_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: word_count(); break; case 1: goto_line(); break; case 2: insert_date_time(); break; case 4: assist_spell_check(); break; case 5: assist_read_aloud(); break; case 6: assist_stop_speech(); break; case 7: assist_translate(); break; case 8: assist_dictate(); break; } return; } } draw_screen(); }
 
 void show_help_menu(void) { int x1 = 44, y1 = 1, w = 14, h = 5, sel = 0, key, i; const char *items[] = {"Help     F1","Docs...","About..."}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 3; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 2; } if (key == KEY_DOWN) { sel++; if (sel > 2) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_tools_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_file_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: show_help(); break; case 1: show_docs(); break; case 2: show_about(); break; } return; } } draw_screen(); }
 

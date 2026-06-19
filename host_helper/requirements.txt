@@ -1,0 +1,20 @@
+# Python dependencies for the OpenQT host helper daemon (oqt_helper.py).
+# Tested on Python 3.13. Install into the venv with:
+#     python3 -m venv host_helper/venv
+#     host_helper/venv/bin/pip install -r host_helper/requirements.txt
+#
+# Only the two direct dependencies are pinned; pip resolves the rest of the
+# tree (ctranslate2, tokenizers, huggingface-hub, requests, beautifulsoup4, ...)
+# automatically.
+
+deep-translator==1.11.4   # English -> Hebrew translation (online Google MT)
+faster-whisper==1.2.1     # speech-to-text for the Dictate feature
+
+# NOT pip-installable -- these are system packages the daemon shells out to,
+# already present on this host (install via apt if you move to another box):
+#   aspell + aspell-en   (English spell check)
+#   espeak-ng            (read-aloud / text-to-speech)
+#   alsa-utils           (arecord -- microphone capture for dictation)
+#
+# The faster-whisper model (default "base.en", ~145 MB) is downloaded from the
+# Hugging Face hub on first dictation and cached under ~/.cache/huggingface.

@@ -12,9 +12,9 @@
 /* Version Information                                                        */
 /*---------------------------------------------------------------------------*/
 
-#define OPENQT_VERSION      "1.0"
-#define OPENQT_VERSION_NUM  0x0100
-#define OPENQT_YEAR         "2024"
+#define OPENQT_VERSION      "3.6.0"
+#define OPENQT_VERSION_NUM  0x0360
+#define OPENQT_YEAR         "2026"
 
 /*---------------------------------------------------------------------------*/
 /* Document Limits                                                            */

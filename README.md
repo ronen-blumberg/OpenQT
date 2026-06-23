@@ -13,7 +13,7 @@ trilingual screen font.
 
 > **Author:** Ronen Blumberg  
 > **License:** Public Domain  
-> **Current version:** OpenQT 3.4.0  
+> **Current version:** OpenQT 3.6.0  
 > **Platform:** Real-mode 16-bit DOS, or 32-bit DOS via DOS4GW (bundled).
 
 ---
@@ -39,6 +39,7 @@ trilingual screen font.
   - [Encryption](#encryption)
 - [oqt2word — export to UTF-8](#oqt2word--export-to-utf-8)
 - [txt2oqt — import from UTF-8](#txt2oqt--import-from-utf-8)
+- [txt2rtf — export to RTF (Hebrew + English)](#txt2rtf--export-to-rtf-hebrew--english)
 - [Round-trip workflow](#round-trip-workflow)
 - [Other tools](#other-tools)
 - [Version history](#version-history)
@@ -53,6 +54,7 @@ trilingual screen font.
 | `openqt.c` / `openqt.exe` | The editor itself. ~3000 lines, single translation unit. |
 | `oqt2word.c` / `oqt2word.exe` | Convert OpenQT files to UTF-8 (for Word / LibreOffice). |
 | `txt2oqt.c` / `txt2oqt.exe` | Convert UTF-8 (or legacy DOS) text into OpenQT format. |
+| `txt2rtf.c` / `txt2rtf.exe` | Convert OpenQT (Hebrew + English) to RTF, preserving bold / underline / bold+underline. |
 | `oqt2qt.c` / `oqt2qt.exe` | Convert OpenQT to QText 5.5 file format. |
 | `qt2oqt.c` / `qt2oqt.exe` | Convert QText 5.5 to OpenQT (visual → logical reorder). |
 | `arabvga.c` / `ARABVGA.EXE` | Uploads CP864 Arabic font into VGA character generator. Supports `/P` for partial overlay (used by trilingual mode). |
@@ -70,7 +72,17 @@ trilingual screen font.
 
 ## Quick start
 
-In a DOS environment (or DOSBox):
+The compiled editor and tools (`openqt.exe`, the converters, `HEBVGA.COM`,
+`ARABVGA.EXE`, `DOS4GW.EXE`) ship in the repo, so you can run it without
+building. Mount the cloned folder as `C:\OPENQT` in DOSBox (or DOSBox-X):
+
+```
+mount c /path/to/this/repo
+c:
+cd \OPENQT
+```
+
+Then, in that DOS environment:
 
 ```
 OQT 3 mydocument.txt  # Hebrew + Arabic + English (trilingual)
@@ -130,6 +142,7 @@ wmake clean
 ```
 wcl386 -bt=dos -l=dos4g oqt2word.c  -fe=oqt2word.exe
 wcl386 -bt=dos -l=dos4g txt2oqt.c   -fe=txt2oqt.exe
+wcl386 -bt=dos -l=dos4g txt2rtf.c   -fe=txt2rtf.exe
 wcl386 -bt=dos -l=dos4g oqt2qt.c    -fe=oqt2qt.exe
 wcl386 -bt=dos -l=dos4g qt2oqt.c    -fe=qt2oqt.exe
 ```
@@ -395,11 +408,12 @@ Arabic, LTR for English / Russian. F5 still overrides manually.
   round-trip — the converter `/R` flag is the right route for taking
   Russian text out to UTF-8.
 
-### Host-assisted features (speech, spell check, translation)
+### Host-assisted features (speech, spell check, translation, paste)
 
-New in 3.4. Four items in the **Tools** menu (**Alt+T**) hand work off to a
-small helper program running on the Linux host, because DOS itself has no
-microphone input, no speech engine, and no modern network access:
+New in 3.4 (Paste Host added in 3.5). Items in the **Tools** menu (**Alt+T**)
+hand work off to a small helper program running on the Linux host, because DOS
+itself has no microphone input, no speech engine, no modern network access, and
+no UTF-8 clipboard:
 
 | Tools item | What it does | Engine (host) |
 |---|---|---|
@@ -408,6 +422,13 @@ microphone input, no speech engine, and no modern network access:
 | **Stop Speech** | Stops playback. | — |
 | **Translate to Hebrew** | Translates English text (selection or document) and inserts the Hebrew at the cursor. **Needs an internet connection.** | online MT |
 | **Dictate (Speech)** | Records from the host microphone (Enter to transcribe, Esc to cancel) and inserts the recognised English text at the cursor. | `whisper` |
+| **Paste Host** (**Alt+V**) | Inserts the host clipboard at the cursor as clean text for the current F4 language — strips niqqud / Arabic harakat, folds smart quotes and dashes to ASCII. Use this instead of DOSBox-X's Ctrl+F6 for Hebrew/Arabic/Russian, which can't represent vowel points and re-maps pasted punctuation. | `xclip` |
+
+**First-time setup (after cloning):** the Python virtualenv and the ~1.5 GB
+speech model are not in the repo — create the venv from
+`host_helper/requirements.txt` and pre-download the multilingual `medium`
+Whisper model. See [`host_helper/README.md`](host_helper/README.md) for the
+exact commands. (Skip this if you only want the editor — the helper is optional.)
 
 **To use them, start the helper on the host first** and leave it running in its
 own terminal, then launch OpenQT as usual:
@@ -480,6 +501,7 @@ and details are in [`host_helper/README.md`](host_helper/README.md).
 | Key | Action |
 |---|---|
 | **F9** | Paste block at cursor |
+| **Alt+V** | Paste host clipboard (via helper; strips niqqud, see Tools) |
 | **Alt+B** | Open block menu (start, end, copy, cut, paste, delete) |
 
 #### Menus
@@ -953,6 +975,47 @@ txt2oqt /R rusdoc-utf8.txt rusdoc.txt
 
 ---
 
+## txt2rtf — export to RTF (Hebrew + English)
+
+`txt2rtf` converts an OpenQT document into a **Rich Text Format** (`.rtf`)
+file that opens with full formatting in Microsoft Word, LibreOffice and
+WordPad. Unlike `oqt2word` (which produces plain UTF-8 and therefore drops
+all bold/underline), `txt2rtf` keeps the inline formatting — this is the
+tool to use when you want the *styled* document, not just the text.
+
+It is intentionally scoped to **Hebrew + English** files (the `OQT` / `OQT H`
+launchers). Arabic (CP864) and Russian (CP866) documents are not handled;
+use `oqt2word` for those.
+
+```
+txt2rtf <input.openqt> <output.rtf>
+```
+
+Example:
+
+```
+txt2rtf mydoc.txt mydoc.rtf      # then open mydoc.rtf in Word / LibreOffice
+```
+
+What it preserves and how:
+
+- **Bold, underline, and bold+underline** runs map to RTF `\b` / `\ul`
+  (and both together). The formatting follows OpenQT's own toggle model
+  exactly, including the fact that styling **resets at the start of each
+  line**, so the RTF matches what you see on screen.
+- **Hebrew** letters are written as Unicode escapes (U+05D0–U+05EA) with a
+  Hebrew-charset font, and Hebrew runs are tagged right-to-left so Word /
+  LibreOffice perform their own bidirectional layout — the same logical-order
+  storage OpenQT uses, no manual reordering. A line containing any Hebrew
+  becomes an RTL paragraph; English-only lines stay left-to-right.
+- The default fonts are **David** (Hebrew) and **Arial** (Latin); change the
+  font names in your word processor after opening if you prefer others.
+
+Encrypted documents are rejected with a message — open the file in OpenQT,
+save it **without** a password, then run `txt2rtf`.
+
+---
+
 ## Round-trip workflow
 
 The full intended workflow for editing OpenQT documents in modern
@@ -1014,7 +1077,35 @@ The reorder logic is the inverse of OpenQT's BiDi pass.
 
 ## Version history
 
-### Version 3.4 (current)
+### Version 3.6 (current)
+
+- **New converter `txt2rtf`** — exports an OpenQT **Hebrew + English**
+  document to **RTF** (`.rtf`), preserving **bold**, **underline** and
+  **bold+underline** runs so the styled text opens correctly in Microsoft
+  Word, LibreOffice and WordPad. Hebrew is emitted as Unicode with
+  right-to-left runs (logical order, like the editor), and the styling
+  follows OpenQT's own toggle model including the per-line reset. Encrypted
+  files are rejected with guidance. Like the other tools it is a 32-bit
+  DOS/4GW build. See [txt2rtf — export to RTF](#txt2rtf--export-to-rtf-hebrew--english).
+
+### Version 3.5
+
+- **Smart Paste from the host clipboard** — a new Tools-menu item
+  ("Paste Host", also bound to **Alt+V**) that inserts the host
+  clipboard at the cursor. Unlike DOSBox-X's own clipboard paste
+  (Ctrl+F6), which converts the clipboard to the active DOS code page
+  and so mangles anything outside the 27 plain CP862 letters (vowel
+  points / niqqud, smart quotes) and re-maps pasted ASCII through the
+  Hebrew keyboard layout (e.g. `.` → ץ), Smart Paste reads the
+  clipboard as full UTF-8 on the host: it strips niqqud and Arabic
+  harakat, folds smart quotes/dashes to ASCII, maps Hebrew / Arabic /
+  Russian letters to the right codepage (following the editor's current
+  F4 language), and the editor inserts the bytes directly — never
+  through the keyboard layout — so punctuation stays literal. Runs
+  through the same `host_helper/` daemon as the other Tools features;
+  needs `xclip` (or `xsel` / `wl-clipboard`) on the host.
+
+### Version 3.4
 
 - **Host-assisted language features** in the Tools menu (Alt+T):
   English spell check, Read Aloud, Stop Speech, Translate to Hebrew,

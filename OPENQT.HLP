@@ -1,5 +1,5 @@
 ============================================================
-            OPENQT v3.4.0 - USER GUIDE
+            OPENQT v3.6.0 - USER GUIDE
 ============================================================
 
 ENGLISH GUIDE
@@ -17,7 +17,7 @@ KEY COMMANDS:
   F8   Replace         F9  Paste block    F10 Embed LTR
   Ctrl+B Bold          Ctrl+U Underline
   Ctrl+Z Undo          Ctrl+Y Redo
-  Alt+X  Exit
+  Alt+V  Paste host     Alt+X  Exit
 
 LAUNCHERS:
   OQT 3 file   Trilingual (Hebrew + Arabic + English)
@@ -38,6 +38,13 @@ RUSSIAN MODE (v3.3):
   ranges overlap CP862 Hebrew + CP864 Arabic, so a Russian
   document cannot also contain Hebrew or Arabic letters.
   Use OQT 3 for the Heb+Ara+Eng combo, OQTR for Russian.
+
+SMART PASTE (v3.5):
+  Tools -> Paste Host, or Alt+V. Inserts the host
+  clipboard for the current F4 language. Strips niqqud
+  and Arabic harakat, folds smart quotes/dashes to ASCII.
+  Use this instead of the emulator clipboard paste for
+  Hebrew/Arabic/Russian. Needs the host helper running.
 
 ENCRYPTION:
   File menu -> Save Encrypted -> enter password.

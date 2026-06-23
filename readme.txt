@@ -4,7 +4,11 @@
                          ║     QText 5.5 Compatible         ║
                          ╚══════════════════════════════════╝
 
-                              Version 1.0 - Public Domain
+                              Version 3.6.0 - Public Domain
+
+         NOTE: This file is a legacy summary. The complete, current
+         documentation is in README.md (Hebrew/English/Arabic/Russian,
+         all tools and converters). See it for anything not covered here.
 
 
 OVERVIEW
@@ -267,6 +271,18 @@ The following features are similar:
 
 VERSION HISTORY
 ===============
+
+(For the full, detailed history see README.md. Summary of headline changes:)
+
+3.6.0 (2026)
+- New converter txt2rtf: OpenQT (Hebrew + English) -> RTF, preserving
+  bold / underline / bold+underline for Word / LibreOffice / WordPad.
+
+3.0-3.5 (2025-2026)
+- Arabic and Russian support (quadlingual editor), positional Arabic
+  shaping, BiDi, encryption, UTF-8 / QText converters, in-editor Docs
+  viewer, and host-assisted tools (spell check, read aloud, translate,
+  dictate, smart paste).
 
 1.0 (2024)
 - Initial release

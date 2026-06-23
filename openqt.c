@@ -1,7 +1,12 @@
 /*
  * OpenQT - Open Source Hebrew/English/Arabic/Russian Word Processor
  * A QText 5.5 Clone for DOS
- * Version 3.4.0
+ * Version 3.6.0
+ *
+ * Changes in 3.6:
+ *   - New converter txt2rtf: exports a Hebrew + English document to RTF,
+ *     preserving bold / underline / bold+underline runs so the styled text
+ *     opens correctly in Microsoft Word, LibreOffice and WordPad.
  *
  * Changes in 3.4:
  *   - Host-assisted language features in the Tools menu (Alt+T), bridged to
@@ -80,7 +85,7 @@
 #include <time.h>
 #include <direct.h>
 
-#define VERSION         "3.4.0"
+#define VERSION         "3.6.0"
 #define MAX_LINES       30000  /* ~500 pages */
 #define MAX_LINE_LEN    256
 #define SAVE_REMIND_SEC 600   /* Save reminder interval in seconds (600 = 10 min) */
@@ -161,6 +166,7 @@
 #define KEY_CTRL_B      2
 #define KEY_ALT_L       38
 #define KEY_ALT_B_FMT   48
+#define KEY_ALT_V       47
 
 /* Host helper bridge (speech/spell/translate via the Linux host daemon).
  * Paths are absolute on the DOSBox C: mount (c: = /home/ronen/dos/eini2). */
@@ -439,6 +445,7 @@ void assist_stop_speech(void);
 void assist_translate(void);
 void assist_spell_check(void);
 void assist_dictate(void);
+void assist_paste_clipboard(void);
 
 char *stristr(const char *haystack, const char *needle)
 {
@@ -3515,6 +3522,34 @@ void assist_dictate(void)
     draw_screen();
 }
 
+/* --- Smart Paste from the host clipboard via the helper bridge --- */
+/* Unlike DOSBox-X's Ctrl+F6 paste, the helper reads the host clipboard as full
+ * UTF-8, strips niqqud / harakat and folds smart punctuation, and returns clean
+ * codepage bytes for the current language. We insert via insert_char (not the
+ * keyboard path), so ASCII like '.' is NOT remapped through the Hebrew layout. */
+void assist_paste_clipboard(void)
+{
+    char *resp;
+    int r, i, save_ins;
+    resp = (char *)malloc(BRIDGE_BUF);
+    if (!resp) { show_dialog("Paste", "Out of memory."); return; }
+    show_busy("Reading host clipboard...");
+    r = bridge_request("CLIP", cur_lang_hint(), NULL, 0, resp, BRIDGE_BUF, 15);
+    if (r < 0) {
+        if (r != -2) show_dialog("Paste", bridge_err(r, resp));
+        free(resp); draw_screen(); return;
+    }
+    if (r == 0) { show_dialog("Paste", "Clipboard empty."); free(resp); draw_screen(); return; }
+    save_ins = doc.insert_mode; doc.insert_mode = 1;
+    for (i = 0; i < r; i++) {
+        if (resp[i] == '\n') insert_line();
+        else insert_char((unsigned char)resp[i]);
+    }
+    doc.insert_mode = save_ins;
+    free(resp);
+    draw_screen();
+}
+
 /* =========== Menu Functions =========== */
 
 void show_file_menu(void) { int x1 = 0, y1 = 1, w = 22, h = 12, sel = 0, key, i; char fn[256]; const char *items[] = {"New","Open          F3","Save          F2","Save As...","Save Encrypted...","Remove Password...","Print","----------------------","Exit       Alt+X"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 9; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 8; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 8) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_help_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_edit_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: new_document(); break; case 1: fn[0] = '\0'; if (file_dialog("Open File", fn, sizeof(fn), 0)) load_file(fn); draw_screen(); break; case 2: if (doc.encrypted) save_file_encrypted(doc.filename, doc.password); else save_file(doc.filename); draw_screen(); break; case 3: save_file_as(); draw_screen(); break; case 4: save_with_password(); draw_screen(); break; case 5: remove_password(); draw_screen(); break; case 6: print_document(); break; case 8: running = 0; break; } return; } } draw_screen(); }
@@ -3527,7 +3562,7 @@ void show_block_menu(void) { int x1 = 21, y1 = 1, w = 18, h = 8, sel = 0, key, i
 
 void show_options_menu(void) { int x1 = 29, y1 = 1, w = 22, h = 10, sel = 0, key, i; char items[8][25]; const char *langname; while (1) { langname = (doc.input_lang == LANG_HEB) ? "Hebrew" : (doc.input_lang == LANG_ARA) ? "Arabic" : (doc.input_lang == LANG_RUS) ? "Russian" : "English"; sprintf(items[0], "Lang: %-7s    F4", langname); sprintf(items[1], "[%c] Embed English F10", doc.embedded_ltr ? 'X' : ' '); sprintf(items[2], "[%c] RTL Mode       F5", doc.rtl_mode ? 'X' : ' '); sprintf(items[3], "[%c] Word Wrap", doc.word_wrap ? 'X' : ' '); sprintf(items[4], "[%c] Show Ruler", doc.show_ruler ? 'X' : ' '); sprintf(items[5], "[%c] Insert Mode   Ins", doc.insert_mode ? 'X' : ' '); sprintf(items[6], "[%c] Save Reminder 10m", doc.save_reminder ? 'X' : ' '); strcpy(items[7], "----------------------"); draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 6; } while (sel == 7); } if (key == KEY_DOWN) { do { sel++; if (sel > 6) sel = 0; } while (sel == 7); } if (key == KEY_LEFT) { draw_screen(); show_block_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_tools_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER || key == ' ') { switch (sel) { case 0: cycle_input_lang(); break; case 1: toggle_embedded_ltr(); break; case 2: toggle_rtl(); break; case 3: toggle_wrap(); break; case 4: doc.show_ruler = !doc.show_ruler; draw_screen(); break; case 5: toggle_insert(); break; case 6: toggle_save_reminder(); break; } } } draw_screen(); }
 
-void show_tools_menu(void) { int x1 = 37, y1 = 1, w = 24, h = 11, sel = 0, key, i; const char *items[] = {"Word Count","Go To Line","Insert Date/Time","----------------------","Spell Check (Eng)","Read Aloud","Stop Speech","Translate to Hebrew","Dictate (Speech)"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 9; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 8; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 8) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_options_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_help_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: word_count(); break; case 1: goto_line(); break; case 2: insert_date_time(); break; case 4: assist_spell_check(); break; case 5: assist_read_aloud(); break; case 6: assist_stop_speech(); break; case 7: assist_translate(); break; case 8: assist_dictate(); break; } return; } } draw_screen(); }
+void show_tools_menu(void) { int x1 = 37, y1 = 1, w = 24, h = 12, sel = 0, key, i; const char *items[] = {"Word Count","Go To Line","Insert Date/Time","----------------------","Spell Check (Eng)","Read Aloud","Stop Speech","Translate to Hebrew","Dictate (Speech)","Paste Host   Alt+V"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 10; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 9; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 9) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_options_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_help_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: word_count(); break; case 1: goto_line(); break; case 2: insert_date_time(); break; case 4: assist_spell_check(); break; case 5: assist_read_aloud(); break; case 6: assist_stop_speech(); break; case 7: assist_translate(); break; case 8: assist_dictate(); break; case 9: assist_paste_clipboard(); break; } return; } } draw_screen(); }
 
 void show_help_menu(void) { int x1 = 44, y1 = 1, w = 14, h = 5, sel = 0, key, i; const char *items[] = {"Help     F1","Docs...","About..."}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 3; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 2; } if (key == KEY_DOWN) { sel++; if (sel > 2) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_tools_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_file_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: show_help(); break; case 1: show_docs(); break; case 2: show_about(); break; } return; } } draw_screen(); }
 
@@ -3581,6 +3616,7 @@ void process_key(int key, int extended)
             case KEY_ALT_X: running = 0; break;
             case KEY_ALT_L: toggle_underline(); break;
             case KEY_ALT_U: toggle_boldunder(); break;
+            case KEY_ALT_V: assist_paste_clipboard(); break;
         }
     } else {
         switch (key) {

@@ -32,6 +32,7 @@ import time
 import signal
 import subprocess
 import tempfile
+import unicodedata
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -101,6 +102,96 @@ FMT_BYTES = {0x02, 0x03, 0x04, 0xAE, 0xAF}
 
 # Reverse map for translation result: Unicode Hebrew -> CP862 byte
 UNI_TO_CP862 = {0x05D0 + i: 0x80 + i for i in range(27)}
+
+# Reverse maps for Smart Paste (Unicode -> OpenQT byte) built from the tables
+# above. setdefault keeps the first (canonical) byte when a codepoint repeats.
+UNI_TO_CP864 = {}
+for _i, _cp in enumerate(CP864):
+    if _cp and _cp not in (LAMALEF_PAIR, LAMALEF_PLAIN):
+        UNI_TO_CP864.setdefault(_cp, 0xA0 + _i)
+UNI_TO_CP866 = {}
+for _i, _cp in enumerate(CP866):
+    UNI_TO_CP866.setdefault(_cp, 0x80 + _i)
+
+# Punctuation that has no codepage equivalent -> nearest ASCII (None = drop).
+# Smart quotes/dashes, NBSP, and Hebrew punctuation marks are the common
+# offenders in copied web text.
+PUNCT_MAP = {
+    0x2018: 0x27, 0x2019: 0x27, 0x201A: 0x27, 0x201B: 0x27,   # ' variants
+    0x2032: 0x27, 0x05F3: 0x27,                               # prime, geresh
+    0x201C: 0x22, 0x201D: 0x22, 0x201E: 0x22, 0x201F: 0x22,   # " variants
+    0x2033: 0x22, 0x05F4: 0x22, 0x00AB: 0x22, 0x00BB: 0x22,   # dprime, gershayim, guillemets
+    0x2013: 0x2D, 0x2014: 0x2D, 0x2015: 0x2D, 0x2212: 0x2D,   # dashes / minus
+    0x05BE: 0x2D, 0x00AD: 0x2D,                               # maqaf, soft hyphen
+    0x00A0: 0x20, 0x2007: 0x20, 0x202F: 0x20,                 # NBSP variants
+    0x2026: None,                                             # ellipsis (expanded below)
+    0x200E: None, 0x200F: None, 0x200B: None,                 # LRM / RLM / ZWSP
+    0x200C: None, 0x200D: None, 0xFEFF: None,                 # ZWNJ / ZWJ / BOM
+}
+
+
+def unicode_to_oqt(text, lang):
+    """Convert an arbitrary Unicode string (e.g. the host clipboard) to raw
+    OpenQT bytes for the editor's current language. Niqqud / Arabic harakat and
+    any other combining marks are stripped (CP862/864 have no glyphs for them),
+    smart punctuation is folded to ASCII, and Hebrew/Arabic/Russian letters map
+    to their codepage bytes. Unmappable codepoints are dropped. This is exactly
+    what makes pasted vocalized Hebrew come out clean."""
+    text = unicodedata.normalize("NFKD", text)
+    out = bytearray()
+    for ch in text:
+        cp = ord(ch)
+        if cp == 0x0A:
+            out.append(0x0A); continue
+        if cp == 0x0D:                      # CR -> drop (LF carries the break)
+            continue
+        if cp == 0x09:
+            out.append(0x09); continue
+        if cp == 0x2026:                    # ellipsis -> ...
+            out += b"..."; continue
+        if cp in PUNCT_MAP:
+            m = PUNCT_MAP[cp]
+            if m is not None:
+                out.append(m)
+            continue
+        if unicodedata.combining(ch):       # niqqud, harakat, accents -> drop
+            continue
+        if cp < 0x20:
+            continue
+        if cp < 0x80:                       # ASCII passes through verbatim
+            out.append(cp); continue
+        if lang == "RU":
+            if cp in UNI_TO_CP866:
+                out.append(UNI_TO_CP866[cp])
+        else:                               # HE / AR / EN (and trilingual)
+            if cp in UNI_TO_CP862:
+                out.append(UNI_TO_CP862[cp])
+            elif cp in UNI_TO_CP864:
+                out.append(UNI_TO_CP864[cp])
+        # anything else: silently dropped
+    return bytes(out)
+
+
+def read_host_clipboard():
+    """Return the host clipboard as a Unicode string, or raise RuntimeError."""
+    if _which("wl-paste"):
+        cmd = ["wl-paste", "-n"]
+    elif _which("xclip"):
+        cmd = ["xclip", "-selection", "clipboard", "-o"]
+    elif _which("xsel"):
+        cmd = ["xsel", "-b", "-o"]
+    else:
+        raise RuntimeError("no clipboard tool (install xclip, xsel, or wl-clipboard)")
+    env = dict(os.environ)
+    env.setdefault("DISPLAY", ":0")
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=5, env=env)
+    except Exception as e:
+        raise RuntimeError("clipboard read error: %s" % e)
+    if r.returncode != 0:
+        raise RuntimeError("clipboard read failed: %s"
+                           % r.stderr.decode("utf-8", "replace")[:120])
+    return r.stdout.decode("utf-8", "replace")
 
 
 def oqt_to_unicode(data, lang):
@@ -331,6 +422,19 @@ def handle_recstop(lang, payload):
     return "OK", text.encode("ascii", "replace")
 
 
+def handle_clip(lang, payload):
+    """Smart Paste: read the host clipboard, convert UTF-8 (incl. vocalized
+    Hebrew) to clean OpenQT codepage bytes for the editor's current language."""
+    try:
+        text = read_host_clipboard()
+    except RuntimeError as e:
+        return "ERR", str(e).encode("utf-8")[:200]
+    data = unicode_to_oqt(text, lang)
+    if not data:
+        return "ERR", b"clipboard has no pasteable text"
+    return "OK", data
+
+
 HANDLERS = {
     "PING": handle_ping,
     "TTS": handle_tts,
@@ -340,6 +444,7 @@ HANDLERS = {
     "RECSTART": handle_recstart,
     "RECSTOP": handle_recstop,
     "RECCANCEL": handle_reccancel,
+    "CLIP": handle_clip,
 }
 
 

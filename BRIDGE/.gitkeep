@@ -1,3 +1,0 @@
-# This directory is the runtime file-handshake bridge between OpenQT (DOS)
-# and the host helper daemon. It is created/used at runtime; contents are
-# transient and gitignored. This placeholder just keeps the directory in git.

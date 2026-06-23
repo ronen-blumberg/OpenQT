@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 OpenQT is a DOS Hebrew/English/Arabic/Russian word processor (a QText 5.5 clone) written in C and built with the **Watcom C/C++** compiler. The repository is not a git repo; it is a working directory checked out on Linux but the program itself only runs under DOS (real-mode 16-bit, or 32-bit via DOS4GW). `DOS4GW.EXE` is bundled.
 
-The author is Ronen Blumberg. Versioning is tracked in the `openqt.c` header comment, the `#define VERSION` constant (`openqt.c:83`, used by the About box at `openqt.c:2700`), and `make_hlp.py`'s `HEADER` string — currently **Version 3.4.0**. `config.h` and `readme.txt` lag far behind (1.0); the new `README.md` (~46 KB) is the user-facing doc and is current. Treat `openqt.c` and `README.md` as the source of truth when older files disagree. When bumping the version, update those three spots **plus `README.md`** (its `Current version:` line and the `## Version history` section) — they tend to drift; rerun `make_hlp.py` afterward so the four `.HLP` files pick up the new header, and rebuild `openqt.exe` so the About box updates.
+The author is Ronen Blumberg. Versioning is tracked in the `openqt.c` header comment, the `#define VERSION` constant (`openqt.c:88`, used by the About box at `openqt.c:2707`), and `make_hlp.py`'s `HEADER` string — currently **Version 3.6.0**. `config.h` (`OPENQT_VERSION`) and `readme.txt` carry the version too but are otherwise stale/legacy stubs — `README.md` (~46 KB) is the live user-facing doc. Keep `config.h`/`readme.txt` version markers in sync when bumping, but treat their content as historical. Treat `openqt.c` and `README.md` as the source of truth when older files disagree. When bumping the version, update those three spots **plus `README.md`** (its `Current version:` line and the `## Version history` section) — they tend to drift; rerun `make_hlp.py` afterward so the four `.HLP` files pick up the new header, and rebuild `openqt.exe` so the About box updates.
 
 ## Build commands
 
@@ -22,13 +22,14 @@ Main editor (32-bit, DOS4GW — preferred):
 wcl386 -bt=dos -l=dos4g openqt.c -fe=openqt.exe
 ```
 
-Via the makefile (defaults to 16-bit real-mode build):
+Via the makefile:
 ```
-wmake              # 16-bit openqt.exe
-wmake openqt32.exe # 32-bit DOS4GW build
+wmake              # default target: 16-bit openqt.exe — CURRENTLY FAILS to link
+wmake openqt32.exe # 32-bit DOS4GW build (-> openqt32.exe) — this is the one that builds
 wmake both
 wmake clean
 ```
+**The default `wmake` target (16-bit) no longer compiles** — it dies on the pre-existing `int386` calls at `openqt.c:524/533/542` (Open Watcom's 16-bit target rejects `int386`). Use the 32-bit `wcl386` command above (or `wmake openqt32.exe`) for any real build. Note the makefile's 32-bit target emits `openqt32.exe`, whereas the manual `wcl386` line emits `openqt.exe` — the BAT launchers run `OPENQT`, so keep `openqt.exe` current.
 
 Helper utilities (each is a standalone single-file program with its own `*-watcom-compile.txt`):
 ```
@@ -36,6 +37,7 @@ wcl386 -bt=dos -l=dos4g oqt2qt.c   -fe=oqt2qt.exe   # OpenQT -> QText 5.5
 wcl386 -bt=dos -l=dos4g qt2oqt.c   -fe=qt2oqt.exe   # QText 5.5 -> OpenQT
 wcl386 -bt=dos -l=dos4g oqt2word.c -fe=oqt2word.exe # OpenQT -> UTF-8
 wcl386 -bt=dos -l=dos4g txt2oqt.c  -fe=txt2oqt.exe  # UTF-8 (or legacy DOS) -> OpenQT
+wcl386 -bt=dos -l=dos4g txt2rtf.c  -fe=txt2rtf.exe  # OpenQT (Heb+Eng) -> RTF
 wcl       -bt=dos -ml -ox arabvga.c -fe=arabvga.exe # 16-bit Arabic font uploader
 wcl       -bt=dos -ml -ox rusvga.c  -fe=rusvga.exe  # 16-bit Russian (CP866) font uploader
 ```
@@ -58,11 +60,13 @@ DOS resolves a bare command like `ARABVGA` in this order: `.COM` → `.EXE` → 
 
 | BAT | Mode | Font setup |
 |---|---|---|
-| `OQT 3 file` | **Trilingual** (Hebrew + Arabic + English) | `HEBVGA` then `ARABVGA /P` then `OPENQT /A` |
-| `OQT H file` / `OQTH.BAT` | Hebrew + English | `HEBVGA` then `OPENQT` |
-| `OQT A file` / `OQTA.BAT` | Arabic + English | `ARABVGA` then `OPENQT /A` |
-| `OQT R file` / `OQTR.BAT` | Russian + English (CP866) | `RUSVGA` then `OPENQT /R` |
+| `OQT 3 file` | **Trilingual** (Hebrew + Arabic + English) | `CHCP 862` then `HEBVGA` then `ARABVGA /P` then `OPENQT /A` |
+| `OQT H file` / `OQTH.BAT` | Hebrew + English | `CHCP 862` then `HEBVGA` then `OPENQT` |
+| `OQT A file` / `OQTA.BAT` | Arabic + English | `CHCP 864` then `ARABVGA` then `OPENQT /A` |
+| `OQT R file` / `OQTR.BAT` | Russian + English (CP866) | `CHCP 866` then `RUSVGA` then `OPENQT /R` |
 | `OQT file` | Default (Hebrew) | same as `OQT H` |
+
+The leading `CHCP <cp>` in each launcher exists **only** for DOSBox-X's host-clipboard paste (Ctrl+F6 in the user's setup), not for OpenQT itself — OpenQT uploads its own VGA font and reads raw keystroke bytes regardless of the active code page. DOSBox-X's paste converts the host's UTF-8 clipboard to the *active DOS code page* before injecting keystrokes; the default CP437 has no Hebrew/Arabic/Russian, so without `CHCP` pasted RTL text arrives as gibberish (ASCII pastes fine in any code page, which is why English always worked). With the matching code page, paste delivers CP862/864/866 bytes (0x80–0x9A etc.), and `process_key` (`openqt.c:3566`) inserts any byte ≥ 128 directly — no keyboard remap — so pasted text lands in logical order exactly as if typed. Trilingual uses `CHCP 862`, so only Hebrew pastes correctly there (the paste target is a single code page); use `OQT A` for Arabic paste. `CHCP` is scoped to the launcher so it doesn't disturb other DOS programs in the same DOSBox-X session.
 
 Russian mode (CP866) is **its own session** — CP866 Cyrillic letters at 0x80–0xAF + 0xE0–0xEF overlap both CP862 Hebrew (0x80–0x9A) and CP864 Arabic (0xA0–0xFE) byte ranges, so RUSVGA does *not* have a `/P` partial-overlay flag. A document opened in Russian mode and then reopened in Hebrew/Arabic mode will render letter bytes as the wrong script. The 8-bit storage cannot disambiguate which script a high-byte belongs to; quad-script-in-one-document would require switching the buffer to UTF-8 (a much larger rewrite).
 
@@ -71,7 +75,7 @@ Trilingual mode works because the CP862 Hebrew font (letters at 0x80–0x9A) and
 ## Architecture
 
 ### One big file
-Almost all editor functionality lives in **`openqt.c`** (~150 KB, ~3700 lines). It is a single translation unit with internal forward declarations near the top (search for `/* Forward declarations */` around line 376). The companion headers `config.h`, `hebrew.h`, and `bidi.h` are **not included by openqt.c** — openqt.c re-defines its own constants, its own `heb_map[128]` table, and its own inline BiDi implementation. Treat `config.h`/`hebrew.h`/`bidi.h` as historical reference; the live values are the `#define`s and tables inside `openqt.c`. `openqt.c` raises `MAX_LINES` to 30000 (vs. 5000 in `config.h`) and adds undo/encryption/formatting/Arabic-shaping state not present in those headers. `bidi.h` ends with an "INTEGRATION GUIDE FOR OPENQT.C" block; `BIDI_PATCH.txt` is an older patch describing how those changes were folded in. Both are documentation, not active code.
+Almost all editor functionality lives in **`openqt.c`** (~150 KB, ~3700 lines). It is a single translation unit with internal forward declarations near the top (search for `/* Forward declarations */` around line 382). The companion headers `config.h`, `hebrew.h`, and `bidi.h` are **not included by openqt.c** — openqt.c re-defines its own constants, its own `heb_map[128]` table, and its own inline BiDi implementation. Treat `config.h`/`hebrew.h`/`bidi.h` as historical reference; the live values are the `#define`s and tables inside `openqt.c`. `openqt.c` raises `MAX_LINES` to 30000 (vs. 5000 in `config.h`) and adds undo/encryption/formatting/Arabic-shaping state not present in those headers. `bidi.h` ends with an "INTEGRATION GUIDE FOR OPENQT.C" block; `BIDI_PATCH.txt` is an older patch describing how those changes were folded in. Both are documentation, not active code.
 
 ### Runtime model
 - **Direct hardware access.** The editor writes to VGA text-mode memory at `0xB8000` (`video_mem` in openqt.c). Uses `conio.h`/`dos.h`/`i86.h` and INT 10h/16h BIOS calls. There is no abstraction layer — porting off DOS would mean rewriting the I/O.
@@ -98,6 +102,10 @@ Almost all editor functionality lives in **`openqt.c`** (~150 KB, ~3700 lines). 
 
 **`txt2oqt.c`** — UTF-8 (default) or legacy DOS (auto-detected via missing BOM, or `/D` flag) → OpenQT. UTF-8 mode reverses the `oqt2word` mapping plus translates `**bold**` and `__underline__` markdown markers into FMT_BOLD/FMT_UNDERLINE toggles. It also folds Arabic Presentation Forms-B (U+FE70–U+FEFF) back to base letters before mapping to CP864, so files exported by older `oqt2word` builds still round-trip. Legacy mode handles both Hebrew CP862 and Arabic CP864 visual-to-logical reversal (extended in v3.2; was Hebrew-only before). **`/R` flag** switches the target to CP866: Cyrillic + Yo/Ye/Yi/Short-U + box-drawing + the CP866 graphics tail are mapped to their CP866 byte values via `unicode_to_cp866()`; Hebrew/Arabic codepoints are dropped. Order reversal is skipped under `/R` regardless of `/D` — Russian DOS files are LTR-only.
 
+**`txt2rtf.c`** — OpenQT → RTF, **Hebrew + English only** (Arabic/Russian intentionally out of scope; no `/R` flag). Emits a `{\rtf1\ansi\ansicpg1255 ...\uc1}` document with a two-font table (`\f0` Latin `\fcharset0`, `\f1` Hebrew `\fcharset177`). Hebrew CP862 bytes (0x80–0x9A) become `\uNNNN?` Unicode escapes (U+05D0–U+05EA, decimal); ASCII passes through with `\` `{` `}` escaped and tab → `\tab`. The OpenQT file is **logical order and so is RTF**, so nothing is reordered — the word processor does its own BiDi (a line containing any Hebrew gets `\rtlpar`, else `\ltrpar`). It replicates openqt.c's stateful-toggle model exactly (`openqt.c:790`): a single current-attribute (NORMAL/BOLD/UNDERLINE/BOLDUNDER) that **resets to NORMAL at the start of every line**; `FMT_START` (0xAF) / `FMT_END` (0xAE) are also honoured as a generic bold span. Detects the `OQT-ENC1` magic and refuses encrypted input (open in OpenQT, save unencrypted, then convert).
+
+  **Formatting/run model — read this before touching the output.** The earlier streaming design (one `\rtlch`/`\ltrch` toggle stream with `\b`/`\ulnone` sprinkled in) produced *invisible bold on Hebrew*: bold visibly slid onto the next Latin run. Two RTF-bidi facts caused it and the current design encodes both. (1) A right-to-left run (`\rtlch`) takes its bold/underline from the **associated** character properties `\ab`/`\aul`, **not** `\b`/`\ul` (those are the LTR-run properties) — so every styled run emits **both** forms (`\b\ab`, `\ul\aul`). (2) The direction+font (`\rtlch\af1\f1` / `\ltrch\f0`) must be written **before** the attribute words, or the reader binds the style to the wrong run. The implementation (`open_run_group()` + the per-char run loop) coalesces characters into maximal `(direction, attribute)` runs and wraps **each run in its own `{…}` group** — `{` then direction+font then `\b\ab`/`\ul\aul` then text then `}` — so formatting auto-resets at the brace and cannot bleed. Neutrals (space/punctuation) are sticky to the current run direction. This mirrors what Word itself emits. Verify changes by converting the RTF to HTML (`libreoffice --headless --convert-to html`) and checking the `<b>`/`<u>` tags actually wrap the Hebrew — plain-text extraction won't reveal styling.
+
 **`qt2oqt.c` / `oqt2qt.c`** — QText 5.5 ↔ OpenQT. Hebrew-only legacy. QText 5.5 stores in **visual** order; OpenQT in **logical** order. The pairs reverse Hebrew lines accordingly and translate `0xAF`/`0xAE` ↔ OpenQT's toggle bytes. Both also rewrap to QText's 71-column line.
 
 ### Encryption
@@ -113,7 +121,9 @@ Why the split: a single .HLP can only render scripts whose fonts are loaded. CP8
 
 ### Host helper bridge (speech / spell check / translation)
 
-Four Tools-menu features (Alt+T) run **on the Linux host**, not in DOS, because DOSBox has no mic input, no speech engine, and no network TLS: **Spell Check (Eng)** (`aspell`, interactive), **Read Aloud** (`espeak-ng`), **Translate to Hebrew** (`deep-translator`, online Google MT), and **Dictate** (`arecord` + `faster-whisper`). **Stop Speech** halts playback. Audio in/out and the network all happen host-side, which is exactly why the two "impossible in DOS" features (STT, real MT) work.
+Five Tools-menu features (Alt+T) run **on the Linux host**, not in DOS, because DOSBox has no mic input, no speech engine, no network TLS, and no UTF-8 clipboard access: **Spell Check (Eng)** (`aspell`, interactive), **Read Aloud** (`espeak-ng`), **Translate to Hebrew** (`deep-translator`, online Google MT), **Dictate** (`arecord` + `faster-whisper`), and **Paste Host** (`xclip`/`xsel`/`wl-paste`; also bound to **Alt+V**). **Stop Speech** halts playback. Audio in/out, the network, and the host clipboard all happen host-side, which is exactly why the otherwise-"impossible in DOS" features (STT, real MT, Unicode paste) work.
+
+**Smart Paste (`CLIP` command, `assist_paste_clipboard()`):** this exists because DOSBox-X's own clipboard paste (Ctrl+F6) is unusable for RTL text — it converts the host clipboard to the active DOS code page, so (a) anything outside the 27 CP862 letters (niqqud, smart-quotes) becomes garbage, and (b) pasted ASCII is re-mapped through OpenQT's Hebrew keyboard layout (e.g. `.`→ץ) because it arrives as keystrokes. Smart Paste sidesteps both: the daemon reads the clipboard as full UTF-8, `unicode_to_oqt()` NFKD-normalizes + strips combining marks (niqqud/harakat) + folds smart punctuation to ASCII + maps Hebrew/Arabic/Russian letters to their codepage bytes (language chosen by `cur_lang_hint()`), and the editor inserts the returned bytes via `insert_char()` — **not** the keyboard path — so ASCII is never re-mapped. `xclip` etc. are system packages (like `aspell`/`espeak-ng`), not pip deps; `read_host_clipboard()` defaults `DISPLAY=:0` so it still works when the daemon's env lacks it.
 
 **Read Aloud and Dictate are language-aware** — both follow the editor's current input language (the F4 cycle): `assist_read_aloud()`/`assist_dictate()` send `cur_lang_hint()` (EN|HE|AR|RU) as the bridge `lang` field. Read Aloud maps that to an espeak-ng voice (`ESPEAK_VOICE`: en/he/ar/ru). Dictate currently supports **English + Hebrew**: the daemon decodes with Whisper `language="he"` when the hint is HE (else `"en"`) and returns the result in the matching codepage (CP862 for Hebrew via `hebrew_to_oqt()`, ASCII for English). So switching the editor to Hebrew (F4) makes both speak/transcribe Hebrew.
 
@@ -121,7 +131,7 @@ Four Tools-menu features (Alt+T) run **on the Linux host**, not in DOS, because 
 - **Whisper model for Dictate**: the daemon loads a faster-whisper model named by `OQT_WHISPER_MODEL` (default `medium`, set in `oqt_helper.py`). **It must be a multilingual model — a `.en` model (e.g. `base.en`) cannot transcribe Hebrew at all.** To avoid a ~1.5 GB first-run download stalling the editor's 300 s `RECSTOP` timeout, the `medium` model is **pre-downloaded into `host_helper/models/faster-whisper-medium/`** (`model.bin` + `config.json` + `tokenizer.json` + `vocabulary.txt`); `run_helper.sh` detects that dir and exports `OQT_WHISPER_MODEL=<that path>` so faster-whisper loads from local disk and never touches the HF Hub. Re-download with `curl -L -C -` from `https://huggingface.co/Systran/faster-whisper-medium/resolve/main/<file>` (the HF-hub library's own downloader rate-limits and uses a random-suffix `.incomplete` name that can't resume across process restarts — direct `curl -C -` into the local dir is the reliable path; there is no `preprocessor_config.json` in that repo, so skip it). `small` works and downloads faster but its Hebrew accuracy is too low to be usable; `medium` is the practical minimum for Hebrew on CPU.
 - **The bridge** is a file handshake in `BRIDGE/` (= `C:\OPENQT\BRIDGE` on the DOSBox mount). Editor writes `REQ.TMP` then renames to `REQ.TXT` (`cmd\nlang\n---\n<raw bytes>`); daemon overwrites `RESP.TXT` **in place** with `OK|ERR\n<payload>\n.EOF.\n`; editor polls for the `.EOF.` sentinel. The editor **pre-creates `RESP.TXT` with `WAIT\n`** before each request so its directory entry is cached — this is what makes the read-back survive the DOSBox directory cache (the same class of issue as the `rescan` gotcha). Verified working in headless DOSBox-X via `bridge_test.c` (a standalone PING checker).
 - **All codepage↔UTF-8 conversion lives in the Python daemon** (tables ported verbatim from `oqt2word.c`/`txt2oqt.c`). `openqt.c` only ever reads/writes its native CP862/CP864/CP866 bytes — there is intentionally **no UTF-8 code in `openqt.c`**. Translation returns raw CP862 bytes ready to insert; spell returns ASCII; dictation returns ASCII for English or CP862 for Hebrew (per the editor's current language).
-- **C side in `openqt.c`**: `bridge_request()` does the round-trip (returns payload len, or negative: -1 no bridge, -2 ESC-cancel, -3 timeout, -4 daemon ERR); `gather_doc_text()` collects the selection-or-whole-document as raw bytes; `assist_spell_check/read_aloud/stop_speech/translate/dictate()` are the feature handlers. Big buffers are `malloc`'d (not static/stack) so the code stays within the 16-bit DGROUP/stack limits even though the **32-bit DOS4GW build is the only one that links** (the tree already fails 16-bit on a pre-existing `int386` reference at ~line 517).
+- **C side in `openqt.c`**: `bridge_request()` does the round-trip (returns payload len, or negative: -1 no bridge, -2 ESC-cancel, -3 timeout, -4 daemon ERR); `gather_doc_text()` collects the selection-or-whole-document as raw bytes; `assist_spell_check/read_aloud/stop_speech/translate/dictate/paste_clipboard()` are the feature handlers. Big buffers are `malloc`'d (not static/stack) so the code stays within the 16-bit DGROUP/stack limits even though the **32-bit DOS4GW build is the only one that links** (the tree already fails 16-bit on a pre-existing `int386` reference at ~line 524).
 
 ## Working in this repo
 

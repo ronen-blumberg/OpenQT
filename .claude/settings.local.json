@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(xxd /home/ronen/dos/eini2/OPENQT/OQT.BAT)",
-      "Bash(python3)"
-    ]
-  }
-}

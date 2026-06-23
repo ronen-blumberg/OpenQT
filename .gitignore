@@ -1,4 +1,4 @@
-# --- Watcom / DOS build artifacts ---
+# Watcom / DOS build artifacts
 *.o
 *.obj
 *.map
@@ -6,24 +6,21 @@
 *.lk1
 *.mk
 *.mk1
-*.bak
-# Watcom IDE project files (machine-generated, contain absolute paths)
 *.tgt
 *.wpj
-OPENQT.txt
-OPENTQ.txt
+*.err
+*.bak
 
-# --- Host helper (Python) regenerable / large assets ---
+# Host helper (regeneratable / huge)
 host_helper/venv/
 host_helper/models/
 host_helper/__pycache__/
 *.pyc
 
-# --- Runtime bridge handshake (transient files) ---
-BRIDGE/REQ.TMP
-BRIDGE/REQ.TXT
-BRIDGE/RESP.TXT
-BRIDGE/_work/
+# Runtime scratch
+BRIDGE/
+mydocs/
+*.TMP
 
-# --- Editor / local config ---
+# Editors / OS
 .claude/

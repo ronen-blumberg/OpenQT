@@ -1,20 +1,34 @@
 # Python dependencies for the OpenQT host helper daemon (oqt_helper.py).
-# Tested on Python 3.13. Install into the venv with:
-#     python3 -m venv host_helper/venv
-#     host_helper/venv/bin/pip install -r host_helper/requirements.txt
+# The daemon is cross-platform (Linux, Windows, macOS). Tested on Python 3.13.
+# Install into the venv with:
+#     Linux/macOS:  python3 -m venv host_helper/venv
+#                   host_helper/venv/bin/pip install -r host_helper/requirements.txt
+#     Windows:      python -m venv host_helper\venv
+#                   host_helper\venv\Scripts\pip install -r host_helper\requirements.txt
 #
-# Only the two direct dependencies are pinned; pip resolves the rest of the
-# tree (ctranslate2, tokenizers, huggingface-hub, requests, beautifulsoup4, ...)
-# automatically.
+# Only the direct dependencies are pinned; pip resolves the rest of the tree
+# (ctranslate2, tokenizers, huggingface-hub, requests, beautifulsoup4, ...).
 
 deep-translator==1.11.4   # English -> Hebrew translation (online Google MT)
 faster-whisper==1.2.1     # speech-to-text for the Dictate feature
 
-# NOT pip-installable -- these are system packages the daemon shells out to,
-# already present on this host (install via apt if you move to another box):
+# Cross-platform mic capture for Dictate. REQUIRED on Windows/macOS (no
+# arecord there); on Linux it's optional -- the daemon falls back to arecord.
+sounddevice==0.4.7
+
+# NOT pip-installable -- system packages the daemon shells out to:
 #   aspell + aspell-en   (English spell check)
+#       Linux:   apt install aspell aspell-en
+#       Windows: GNU Aspell port, or skip (Spell Check just reports "not installed")
+#       macOS:   brew install aspell
 #   espeak-ng            (read-aloud / text-to-speech)
-#   alsa-utils           (arecord -- microphone capture for dictation)
+#       Linux:   apt install espeak-ng
+#       Windows: github.com/espeak-ng/espeak-ng releases (add to PATH)
+#       macOS:   brew install espeak-ng
+# Audio PLAYBACK for read-aloud needs no install: PowerShell (Windows),
+# afplay (macOS, built in), or paplay/aplay/ffplay (Linux).
+# Mic capture on Linux WITHOUT sounddevice needs alsa-utils (arecord) or sox.
 #
-# The faster-whisper model (default "base.en", ~145 MB) is downloaded from the
-# Hugging Face hub on first dictation and cached under ~/.cache/huggingface.
+# The faster-whisper model (default "medium", multilingual) is downloaded from
+# the Hugging Face hub on first dictation unless pre-staged under
+# host_helper/models/faster-whisper-medium/ (see README.md / run_helper.*).

@@ -13,7 +13,7 @@ trilingual screen font.
 
 > **Author:** Ronen Blumberg  
 > **License:** Public Domain  
-> **Current version:** OpenQT 3.6.0  
+> **Current version:** OpenQT 3.8.0  
 > **Platform:** Real-mode 16-bit DOS, or 32-bit DOS via DOS4GW (bundled).
 
 ---
@@ -224,10 +224,36 @@ Key features:
 - Search, search-and-replace, with all three scripts.
 - Block (column / range) operations: copy, cut, paste, delete.
 - Word wrap at column 71.
+- **Reformat (reflow)** — re-wrap a marked block, or the whole
+  document, to the column-71 margin: short lines are joined and long
+  lines are re-split at word boundaries, while blank lines (paragraph
+  breaks) are preserved (Block → Reformat).
 - Save reminder every 10 minutes (optional).
 - Page counter (assumes 60 lines per page; up to 500 pages).
 - **Password protection** — files saved encrypted, header `OQT-ENC1`.
 - **CP864 Arabic positional shaping** on the DOS screen (since v3.1+).
+
+### Reformat (reflow) paragraphs
+
+When you bring text in from another program — for example a QText 5.5
+file converted with `qt2oqt`, or a pasted block — the lines may not
+match OpenQT's column-71 margin, so long lines run off the right edge
+of the screen. **Block → Reformat** re-wraps the text to fit:
+
+- **Nothing marked** → the **whole document** is reflowed.
+- **A block marked** (F6 to start, move, End Block) → only the
+  **marked lines** are reflowed.
+
+Within each paragraph the lines are joined and then re-split at word
+boundaries so no line exceeds column 71; runs of spaces are collapsed.
+**Blank lines are preserved** as paragraph separators, so structure
+stays intact. Reformat works on the stored logical-order bytes, so
+Hebrew/Arabic order is never disturbed, and inline bold/underline keep
+travelling with their words.
+
+Reformat rebuilds the buffer in one pass, so it **cannot be undone**
+(it asks you to confirm first and clears the undo history). Save before
+running it if you want a fallback.
 
 ### Launchers
 
@@ -502,7 +528,7 @@ and details are in [`host_helper/README.md`](host_helper/README.md).
 |---|---|
 | **F9** | Paste block at cursor |
 | **Alt+V** | Paste host clipboard (via helper; strips niqqud, see Tools) |
-| **Alt+B** | Open block menu (start, end, copy, cut, paste, delete) |
+| **Alt+B** | Open block menu (start, end, copy, cut, paste, delete, **reformat**) |
 
 #### Menus
 
@@ -516,6 +542,20 @@ and details are in [`host_helper/README.md`](host_helper/README.md).
 | **Alt+T** | Tools |
 | **Alt+H** | Help (submenu: Help / Docs… / About…) |
 | **Alt+X** | Exit |
+
+#### Mouse
+
+Requires a DOS mouse driver (DOSBox and DOSBox-X provide one). If none is
+loaded, the mouse is simply inert and every keyboard command still works.
+
+| Action | Result |
+|---|---|
+| Click a top-bar title | Open that menu (click another title to switch, outside to close) |
+| Click a menu item | Run it |
+| Click in the text | Move the cursor there (LTR and RTL) |
+| Press and drag | Select a block (then use Edit/Block menu Copy/Cut/Paste) |
+| Drag past top/bottom | Auto-scroll while selecting |
+| Mouse wheel | Scroll the document (3 lines per notch) |
 
 ### Docs viewer (Help → Docs…)
 
@@ -1077,7 +1117,47 @@ The reorder logic is the inverse of OpenQT's BiDi pass.
 
 ## Version history
 
-### Version 3.6 (current)
+### Version 3.8 (current)
+
+- **Reformat (reflow)** — **Block → Reformat** re-wraps text to the column-71
+  margin: short lines are joined and long lines are re-split at word
+  boundaries, with blank lines preserved as paragraph breaks. It acts on a
+  marked block if one is set, otherwise on the whole document — handy for
+  tidying converted QText files or pasted text whose lines run off-screen.
+  It works on logical-order bytes (BiDi-safe) and is not undoable (confirms
+  first, then clears the undo history).
+- **Visible mouse pointer under DOSBox-X** — OpenQT now draws the mouse
+  pointer itself (a bright highlight cell painted straight into video memory)
+  instead of relying on the DOS driver's own cursor, which DOSBox-X's default
+  mouse "integration" mode never renders. The pointer is now visible in every
+  DOSBox-X mouse mode and at fullscreen scaling.
+
+### Version 3.7
+
+- **Mouse support** — OpenQT now reads the DOS mouse (INT 33h, emulated by
+  DOSBox / DOSBox-X) when a driver is present; everything degrades to a
+  no-op if none is. Four things are now clickable:
+  - **Menus** — click a title on the top bar (File / Edit / Search / Block /
+    Options / Tools / Help) to open it, click an item to run it, click
+    another title to switch, or click outside to close. Keyboard menu
+    navigation is unchanged.
+  - **Caret positioning** — click anywhere in the text to move the cursor
+    there. Works in both LTR and RTL: the click is mapped back through the
+    same BiDi visual↔logical reordering the editor uses to draw, and through
+    inline bold/underline format codes, so the caret lands exactly where you
+    clicked.
+  - **Drag-select** — press and drag to select a block; the selection uses
+    the same model as keyboard block-marking, so **Edit → Copy/Cut/Paste**
+    and the **Block** menu operate on it directly. Dragging above or below
+    the text auto-scrolls.
+  - **Wheel scrolling** — roll the wheel to scroll the document (three lines
+    per notch) via the CuteMouse wheel API. Falls back silently if the
+    driver or emulator doesn't expose a wheel.
+
+  The mouse pointer appears when the editor is idle and hides while you type
+  or drag, so it never smears the text-mode screen.
+
+### Version 3.6
 
 - **New converter `txt2rtf`** — exports an OpenQT **Hebrew + English**
   document to **RTF** (`.rtf`), preserving **bold**, **underline** and

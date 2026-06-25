@@ -35,6 +35,18 @@ import tempfile
 import unicodedata
 
 # ---------------------------------------------------------------------------
+# Platform detection
+# ---------------------------------------------------------------------------
+# The bridge protocol and all codepage tables are OS-independent; only three
+# things touch the host OS -- clipboard read, audio playback, and mic capture --
+# and each picks an implementation from these flags. The daemon runs natively on
+# Linux, Windows, and macOS (point OQT_BRIDGE at the same folder DOSBox-X mounts
+# as C:\OPENQT\BRIDGE on whichever host).
+IS_WINDOWS = sys.platform.startswith("win")
+IS_MAC = sys.platform == "darwin"
+IS_LINUX = not IS_WINDOWS and not IS_MAC
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 BRIDGE_DIR = os.environ.get(
@@ -172,18 +184,35 @@ def unicode_to_oqt(text, lang):
     return bytes(out)
 
 
-def read_host_clipboard():
-    """Return the host clipboard as a Unicode string, or raise RuntimeError."""
-    if _which("wl-paste"):
-        cmd = ["wl-paste", "-n"]
-    elif _which("xclip"):
-        cmd = ["xclip", "-selection", "clipboard", "-o"]
-    elif _which("xsel"):
-        cmd = ["xsel", "-b", "-o"]
-    else:
-        raise RuntimeError("no clipboard tool (install xclip, xsel, or wl-clipboard)")
-    env = dict(os.environ)
-    env.setdefault("DISPLAY", ":0")
+def _win_clipboard_get():
+    """Read CF_UNICODETEXT from the Windows clipboard via ctypes -- no pip dep
+    and proper Unicode (PowerShell Get-Clipboard mangles encoding)."""
+    import ctypes
+    from ctypes import wintypes
+    CF_UNICODETEXT = 13
+    u32 = ctypes.windll.user32
+    k32 = ctypes.windll.kernel32
+    u32.GetClipboardData.restype = wintypes.HANDLE
+    k32.GlobalLock.restype = ctypes.c_void_p
+    if not u32.OpenClipboard(0):
+        raise RuntimeError("cannot open Windows clipboard")
+    try:
+        h = u32.GetClipboardData(CF_UNICODETEXT)
+        if not h:
+            return ""                       # clipboard empty or not text
+        p = k32.GlobalLock(h)
+        if not p:
+            return ""
+        try:
+            return ctypes.c_wchar_p(p).value or ""
+        finally:
+            k32.GlobalUnlock(h)
+    finally:
+        u32.CloseClipboard()
+
+
+def _run_capture(cmd, env=None):
+    """Run a clipboard-reader command and return its UTF-8 stdout."""
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=5, env=env)
     except Exception as e:
@@ -192,6 +221,37 @@ def read_host_clipboard():
         raise RuntimeError("clipboard read failed: %s"
                            % r.stderr.decode("utf-8", "replace")[:120])
     return r.stdout.decode("utf-8", "replace")
+
+
+def read_host_clipboard():
+    """Return the host clipboard as a Unicode string, or raise RuntimeError.
+
+    Platform-native first (no install needed): ctypes on Windows, pbpaste on
+    macOS, wl-paste/xclip/xsel on Linux. pyperclip is used as a fallback if it
+    happens to be installed."""
+    if IS_WINDOWS:
+        return _win_clipboard_get()
+    if IS_MAC:
+        if _which("pbpaste"):
+            return _run_capture(["pbpaste"])
+        raise RuntimeError("pbpaste not found")
+    # Linux / other X11 / Wayland
+    if _which("wl-paste"):
+        cmd = ["wl-paste", "-n"]
+    elif _which("xclip"):
+        cmd = ["xclip", "-selection", "clipboard", "-o"]
+    elif _which("xsel"):
+        cmd = ["xsel", "-b", "-o"]
+    else:
+        try:                                # last resort: optional pip package
+            import pyperclip
+            return pyperclip.paste() or ""
+        except Exception:
+            raise RuntimeError(
+                "no clipboard tool (install xclip, xsel, or wl-clipboard)")
+    env = dict(os.environ)
+    env.setdefault("DISPLAY", ":0")
+    return _run_capture(cmd, env=env)
 
 
 def oqt_to_unicode(data, lang):
@@ -249,9 +309,145 @@ def ascii_skeleton_line(raw_line):
 # Feature handlers  ->  return (status_str, payload_bytes)
 # ---------------------------------------------------------------------------
 _playing = None       # current TTS playback subprocess
-_recording = None     # current arecord subprocess
-_rec_path = None
 _whisper = None       # lazily loaded faster-whisper model
+
+
+class Recorder:
+    """Cross-platform 16 kHz / mono / 16-bit mic capture for dictation.
+
+    Prefers the `sounddevice` pip package (PortAudio: Windows, macOS, Linux --
+    no device-name guessing), recording into memory and writing a WAV with the
+    stdlib `wave` module on stop. Falls back to a CLI recorder subprocess
+    (arecord on Linux, sox `rec` on macOS/Linux) when sounddevice is absent."""
+
+    SR = 16000
+
+    def __init__(self):
+        self.mode = None        # "sd" | "sub" | None
+        self.path = None
+        self._stream = None
+        self._buf = None
+        self._proc = None
+
+    def active(self):
+        if self.mode == "sd":
+            return self._stream is not None
+        if self.mode == "sub":
+            return self._proc is not None and self._proc.poll() is None
+        return False
+
+    def start(self, path):
+        self.cancel()                       # drop any prior capture
+        self.path = path
+        try:
+            import sounddevice as sd         # PortAudio: truly cross-platform
+        except Exception:
+            sd = None
+        if sd is not None:
+            self._buf = []
+            # RawInputStream gives raw int16 bytes -> no numpy needed.
+            def _cb(indata, frames, time_info, status):
+                self._buf.append(bytes(indata))
+            self._stream = sd.RawInputStream(
+                samplerate=self.SR, channels=1, dtype="int16", callback=_cb)
+            self._stream.start()
+            self.mode = "sd"
+            return
+        cmd = self._sub_cmd(path)
+        if cmd is None:
+            raise RuntimeError(
+                "no mic capture: pip install sounddevice "
+                "(or install arecord / sox)")
+        self._proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.mode = "sub"
+
+    def _sub_cmd(self, path):
+        if _which("arecord"):               # Linux/ALSA
+            return ["arecord", "-q", "-f", "S16_LE", "-r", str(self.SR),
+                    "-c", "1", "-t", "wav", path]
+        if _which("rec"):                   # sox (macOS/Linux)
+            return ["rec", "-q", "-r", str(self.SR), "-c", "1", "-b", "16",
+                    path]
+        if IS_MAC and _which("ffmpeg"):     # macOS AVFoundation default mic
+            return ["ffmpeg", "-y", "-f", "avfoundation", "-i", ":default",
+                    "-ar", str(self.SR), "-ac", "1", path]
+        return None
+
+    def stop(self):
+        """Finalize the recording and return the WAV path (or None)."""
+        if self.mode == "sd":
+            try:
+                self._stream.stop()
+                self._stream.close()
+            finally:
+                self._stream = None
+            import wave
+            with wave.open(self.path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)            # int16
+                w.setframerate(self.SR)
+                w.writeframes(b"".join(self._buf or []))
+            self._buf = None
+        elif self.mode == "sub":
+            if self._proc and self._proc.poll() is None:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=3)
+                except Exception:
+                    pass
+            self._proc = None
+        path = self.path
+        self.mode = None
+        return path
+
+    def cancel(self):
+        if self.mode == "sd" and self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+            self._buf = None
+        elif self.mode == "sub" and self._proc and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+            self._proc = None
+        self.mode = None
+
+
+_recorder = Recorder()
+
+
+def _play_wav_async(wav):
+    """Start playing a WAV file and return a killable Popen so Stop Speech can
+    terminate it. Picks a player per OS: PowerShell SoundPlayer on Windows
+    (always present, no install), afplay on macOS, and the first available of
+    paplay/aplay/ffplay/play on Linux."""
+    if IS_WINDOWS:
+        # SoundPlayer.PlaySync blocks for the clip's duration; terminating the
+        # PowerShell process stops playback immediately.
+        ps = "(New-Object Media.SoundPlayer '%s').PlaySync()" % wav
+        return subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if IS_MAC and _which("afplay"):
+        return subprocess.Popen(["afplay", wav],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+    for p in ("paplay", "aplay", "ffplay", "play"):
+        if _which(p):
+            if p == "ffplay":
+                args = ["ffplay", "-nodisp", "-autoexit", "-loglevel",
+                        "quiet", wav]
+            else:
+                args = [p, wav]
+            return subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+    raise RuntimeError("no audio player (install pulseaudio-utils / alsa-utils)")
 
 
 def stop_playback():
@@ -274,16 +470,18 @@ def handle_tts(lang, payload):
     text = oqt_to_unicode(payload, lang).strip()
     if not text:
         return "ERR", b"nothing to read"
+    if not _which("espeak-ng"):
+        return "ERR", b"espeak-ng not installed"
     voice = ESPEAK_VOICE.get(lang, "en-us")
     wav = os.path.join(WORK, "tts.wav")
     r = subprocess.run(["espeak-ng", "-v", voice, "-w", wav, text],
                        capture_output=True)
     if r.returncode != 0 or not os.path.exists(wav):
         return "ERR", b"espeak-ng failed: " + r.stderr[:200]
-    player = "paplay" if _which("paplay") else "aplay"
-    _playing = subprocess.Popen([player, wav],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
+    try:
+        _playing = _play_wav_async(wav)
+    except RuntimeError as e:
+        return "ERR", str(e).encode("ascii", "replace")
     return "OK", b"speaking"
 
 
@@ -371,37 +569,24 @@ def _locate(skeleton, word, reported):
 
 
 def handle_recstart(lang, payload):
-    global _recording, _rec_path
-    if not _which("arecord"):
-        return "ERR", b"arecord not installed"
-    if _recording and _recording.poll() is None:
-        _recording.terminate()
-    _rec_path = os.path.join(WORK, "dictation.wav")
-    _recording = subprocess.Popen(
-        ["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1",
-         "-t", "wav", _rec_path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    path = os.path.join(WORK, "dictation.wav")
+    try:
+        _recorder.start(path)
+    except RuntimeError as e:
+        return "ERR", str(e).encode("ascii", "replace")
     return "OK", b"recording"
 
 
 def handle_reccancel(lang, payload):
-    global _recording
-    if _recording and _recording.poll() is None:
-        _recording.terminate()
-    _recording = None
+    _recorder.cancel()
     return "OK", b"cancelled"
 
 
 def handle_recstop(lang, payload):
-    global _recording, _whisper
-    if not (_recording and _rec_path):
+    global _whisper
+    if not _recorder.active():
         return "ERR", b"not recording"
-    _recording.terminate()
-    try:
-        _recording.wait(timeout=3)
-    except Exception:
-        pass
-    _recording = None
+    rec_path = _recorder.stop()
     if _whisper is None:
         try:
             from faster_whisper import WhisperModel
@@ -411,7 +596,7 @@ def handle_recstop(lang, payload):
             return "ERR", ("faster-whisper not ready: %s" % e).encode()[:300]
     whisper_lang = "he" if lang == "HE" else "en"
     try:
-        segments, _info = _whisper.transcribe(_rec_path, language=whisper_lang)
+        segments, _info = _whisper.transcribe(rec_path, language=whisper_lang)
         text = "".join(seg.text for seg in segments).strip()
     except Exception as e:
         return "ERR", ("transcription failed: %s" % e).encode()[:300]
@@ -503,18 +688,30 @@ def process_request():
 def main():
     os.makedirs(BRIDGE_DIR, exist_ok=True)
     os.makedirs(WORK, exist_ok=True)
+    print("[oqt-helper] platform: %s" % sys.platform, flush=True)
     print("[oqt-helper] watching %s" % BRIDGE_DIR, flush=True)
-    print("[oqt-helper] tools: aspell=%s espeak-ng=%s arecord=%s" % (
-        _which("aspell"), _which("espeak-ng"), _which("arecord")), flush=True)
+    try:
+        import sounddevice  # noqa: F401
+        have_sd = True
+    except Exception:
+        have_sd = False
+    print("[oqt-helper] tools: aspell=%s espeak-ng=%s mic=%s" % (
+        _which("aspell"), _which("espeak-ng"),
+        "sounddevice" if have_sd else (_which("arecord") or _which("rec"))),
+        flush=True)
 
     def _bye(*_a):
         stop_playback()
-        if _recording and _recording.poll() is None:
-            _recording.terminate()
+        _recorder.cancel()
         print("\n[oqt-helper] bye", flush=True)
         sys.exit(0)
     signal.signal(signal.SIGINT, _bye)
-    signal.signal(signal.SIGTERM, _bye)
+    # SIGTERM exists on Windows but registering a handler can raise on some
+    # builds; it's not essential there (Ctrl+C / window close suffice).
+    try:
+        signal.signal(signal.SIGTERM, _bye)
+    except (ValueError, OSError, AttributeError):
+        pass
 
     while True:
         if os.path.exists(REQ):

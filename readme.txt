@@ -4,7 +4,7 @@
                          ║     QText 5.5 Compatible         ║
                          ╚══════════════════════════════════╝
 
-                              Version 3.6.0 - Public Domain
+                              Version 3.8.0 - Public Domain
 
          NOTE: This file is a legacy summary. The complete, current
          documentation is in README.md (Hebrew/English/Arabic/Russian,
@@ -273,6 +273,18 @@ VERSION HISTORY
 ===============
 
 (For the full, detailed history see README.md. Summary of headline changes:)
+
+3.8.0 (2026)
+- Reformat (reflow): Block -> Reformat re-wraps a marked block or the
+  whole document to the column-71 margin (join short lines, split long
+  ones, keep blank-line paragraph breaks). BiDi-safe; not undoable.
+- Mouse pointer is now drawn by OpenQT itself (a bright highlight cell)
+  so it is visible under DOSBox-X mouse-integration mode and fullscreen.
+
+3.7.0 (2026)
+- Mouse support (INT 33h): clickable menus, click-to-position the caret
+  (LTR + RTL), press-drag block selection, and mouse-wheel scrolling.
+  Inert when no mouse driver is present.
 
 3.6.0 (2026)
 - New converter txt2rtf: OpenQT (Hebrew + English) -> RTF, preserving

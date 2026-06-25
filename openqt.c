@@ -1,7 +1,14 @@
 /*
  * OpenQT - Open Source Hebrew/English/Arabic/Russian Word Processor
  * A QText 5.5 Clone for DOS
- * Version 3.6.0
+ * Version 3.8.0
+ *
+ * Changes in 3.7:
+ *   - Mouse support (INT 33h; DOSBox/DOSBox-X provide the driver). Click the
+ *     top menu bar to open menus and click items to run them; click in the
+ *     text to position the caret (LTR and RTL); press-drag to select a block
+ *     (Edit/Block-menu Copy/Cut/Paste operate on it); mouse wheel scrolls.
+ *     Inert with no driver - the keyboard works exactly as before.
  *
  * Changes in 3.6:
  *   - New converter txt2rtf: exports a Hebrew + English document to RTF,
@@ -85,7 +92,7 @@
 #include <time.h>
 #include <direct.h>
 
-#define VERSION         "3.6.0"
+#define VERSION         "3.8.0"
 #define MAX_LINES       30000  /* ~500 pages */
 #define MAX_LINE_LEN    256
 #define SAVE_REMIND_SEC 600   /* Save reminder interval in seconds (600 = 10 min) */
@@ -359,6 +366,22 @@ static int g_ascii_boxes = 0;
  * immediately. CP866 keeps CP437 box-drawing intact at 0xB0..0xDF, so no
  * ASCII-box fallback is needed. */
 static int g_russian_start = 0;
+/* INT 33h mouse driver state. g_mouse_present is set by mouse_init() when a
+ * driver answers (DOSBox/DOSBox-X emulate one). g_menu_jump lets a click on a
+ * different menu-bar title (while a menu is already open) close the current
+ * menu and have run_menu() reopen the clicked one. -1 = no pending jump. */
+static int g_mouse_present = 0;
+static int g_mouse_wheel = 0;    /* CuteMouse wheel API available (fn 11h) */
+static int g_menu_jump = -1;
+
+/* Our own software mouse pointer. DOSBox-X's default "integration" mouse mode
+ * shows the HOST cursor and does NOT render the DOS driver's text cursor, so
+ * the driver's fn-1 pointer is simply invisible there. We sidestep that by
+ * painting the pointer cell into VGA text memory ourselves (always rendered),
+ * saving the character underneath so mouse_hide() can restore it. */
+static int  g_mptr_on = 0;            /* our pointer is currently on screen */
+static int  g_mptr_col = -1, g_mptr_row = -1;
+static char g_mptr_ch = 0, g_mptr_attr = 0;  /* saved cell under the pointer */
 #define MAX_UNDO        250
 
 /* Undo/Redo system */
@@ -406,6 +429,20 @@ void cut_block(void);
 void paste_block(void);
 void delete_block(void);
 void unselect_block(void);
+/* Mouse (INT 33h) + clickable-menu support */
+void mouse_init(void);
+void mouse_show(void);
+void mouse_hide(void);
+void mouse_flush(void);
+int  mouse_get_press(int *col, int *row);
+int  mouse_get_state(int *col, int *row, int *buttons);
+int  mouse_get_wheel(void);
+void mouse_wheel_scroll(int delta);
+int  menubar_hit(int col);
+void cell_to_docpos(int col, int row, int *out_line, int *out_x);
+void mouse_select_text(int col, int row);
+int  menu_input(int which, int x1, int y1, int x2, int y2, int nitems, int *sel);
+void run_menu(int which);
 void show_file_menu(void);
 void show_edit_menu(void);
 void show_search_menu(void);
@@ -419,6 +456,7 @@ void redo_action(void);
 void push_undo(int type, int line, int col, unsigned char ch, const char *saved);
 void clear_undo_stack(void);
 void word_count(void);
+void reformat_text(void);
 void goto_line(void);
 void insert_date_time(void);
 int file_dialog(const char *title, char *filename, int maxlen, int save_mode);
@@ -540,6 +578,253 @@ void show_cursor(int ins_mode)
     regs.h.ch = (unsigned char)(ins_mode ? 6 : 0);
     regs.h.cl = 7;
     int386(0x10, &regs, &regs);
+}
+
+/* =========== Mouse (INT 33h) ===========
+ * All functions here use only register-passing INT 33h calls (no pointers),
+ * so DOS4GW's DPMI host reflects them straight to the real-mode driver. Text
+ * mode reports coordinates in an 8-pixel grid, so a screen cell is (x>>3,y>>3).
+ * We draw our OWN pointer cell into 0xB8000 (mouse_show/mouse_hide) rather than
+ * relying on the driver's fn-1 cursor, which DOSBox-X's integration mouse mode
+ * never renders. As with the driver cursor, we MUST hide it before any other
+ * write to 0xB8000 or it leaves trails. */
+void mouse_init(void)
+{
+    union REGS regs;
+    regs.w.ax = 0x0000;          /* reset & detect */
+    int386(0x33, &regs, &regs);
+    g_mouse_present = (regs.w.ax == 0xFFFF);
+    g_mouse_wheel = 0;
+    if (g_mouse_present) {
+        /* We draw our own pointer (see mouse_show), so the driver's own text
+         * cursor stays hidden — the fn 0 reset above already leaves it hidden.
+         *
+         * Enable + detect the CuteMouse wheel API. The driver does not report
+         * wheel movement until this fn 11h call is made. AX=574Dh ('WM') and
+         * CX bit 0 confirm a wheel is present. */
+        regs.w.ax = 0x0011;
+        int386(0x33, &regs, &regs);
+        if (regs.w.ax == 0x574D && (regs.w.cx & 1)) g_mouse_wheel = 1;
+    }
+}
+
+/* Restore the cell our pointer overwrote, if any. */
+void mouse_hide(void)
+{
+    int off;
+    if (!g_mouse_present || !g_mptr_on) return;
+    off = (g_mptr_row * SCREEN_WIDTH + g_mptr_col) * 2;
+    video_mem[off]     = g_mptr_ch;
+    video_mem[off + 1] = g_mptr_attr;
+    g_mptr_on = 0;
+}
+
+/* Query the live pointer position (INT 33h fn 3) and paint a bright pointer
+ * cell there, saving the character + attribute underneath. The glyph under the
+ * pointer is preserved; only the attribute is forced to 0x4E (bright-yellow on
+ * red) so the pointer is unmistakable even at fullscreen scaling. */
+void mouse_show(void)
+{
+    union REGS regs;
+    int col, row, off;
+    if (!g_mouse_present) return;
+    mouse_hide();                /* clear any previous pointer cell first */
+    regs.w.ax = 0x0003;          /* get position + button state */
+    int386(0x33, &regs, &regs);
+    col = regs.w.cx >> 3;
+    row = regs.w.dx >> 3;
+    if (col < 0 || col >= SCREEN_WIDTH || row < 0 || row >= SCREEN_HEIGHT) return;
+    off = (row * SCREEN_WIDTH + col) * 2;
+    g_mptr_ch   = video_mem[off];
+    g_mptr_attr = video_mem[off + 1];
+    g_mptr_col  = col;
+    g_mptr_row  = row;
+    video_mem[off + 1] = 0x4E;   /* keep glyph, force bright yellow-on-red */
+    g_mptr_on = 1;
+}
+
+/* Discard any queued button-press counts so a click made while a modal dialog
+ * was up doesn't fire a stale menu action afterwards. */
+void mouse_flush(void)
+{
+    union REGS regs;
+    if (!g_mouse_present) return;
+    regs.w.ax = 0x0005; regs.w.bx = 0; int386(0x33, &regs, &regs); /* left  */
+    regs.w.ax = 0x0005; regs.w.bx = 1; int386(0x33, &regs, &regs); /* right */
+}
+
+/* Returns 1 and fills (col,row) in text cells if a left-button press has
+ * occurred since the last call; 0 otherwise. Uses INT 33h fn 5, which reports
+ * the press count and the position OF the press (debounced) in BX/CX/DX. */
+int mouse_get_press(int *col, int *row)
+{
+    union REGS regs;
+    if (!g_mouse_present) return 0;
+    regs.w.ax = 0x0005;          /* button press info, BX=0 -> left button */
+    regs.w.bx = 0;
+    int386(0x33, &regs, &regs);
+    if (regs.w.bx == 0) return 0;         /* no presses since last poll */
+    *col = regs.w.cx >> 3;                /* CX = x pixel at last press  */
+    *row = regs.w.dx >> 3;                /* DX = y pixel at last press  */
+    return 1;
+}
+
+/* Live button state + pointer position (INT 33h fn 3), used to track a drag.
+ * *buttons bit 0 = left, bit 1 = right. Returns 0 if no driver. */
+int mouse_get_state(int *col, int *row, int *buttons)
+{
+    union REGS regs;
+    if (!g_mouse_present) return 0;
+    regs.w.ax = 0x0003;
+    int386(0x33, &regs, &regs);
+    *buttons = regs.w.bx & 0x07;          /* low 3 bits = buttons (BH=wheel) */
+    *col = regs.w.cx >> 3;
+    *row = regs.w.dx >> 3;
+    return 1;
+}
+
+/* Signed wheel movement since the last call (CuteMouse fn 03h -> BH), or 0 if
+ * there is no wheel. Positive = wheel rolled down (scroll toward end). */
+int mouse_get_wheel(void)
+{
+    union REGS regs;
+    if (!g_mouse_present || !g_mouse_wheel) return 0;
+    regs.w.ax = 0x0003;
+    int386(0x33, &regs, &regs);
+    return (signed char)regs.h.bh;
+}
+
+/* Scroll the view by `delta` wheel notches (positive = down), WHEEL_LINES per
+ * notch. The caret is nudged only enough to stay on screen, so update_cursor()
+ * — which runs every idle tick and snaps the view to the caret — won't undo
+ * the scroll. */
+void mouse_wheel_scroll(int delta)
+{
+    int max_scroll, ll;
+    char *ln;
+    if (delta == 0 || doc.num_lines <= 0) return;
+    max_scroll = doc.num_lines - EDIT_HEIGHT;
+    if (max_scroll < 0) max_scroll = 0;
+    doc.scroll_y += delta * 3;             /* WHEEL_LINES = 3 */
+    if (doc.scroll_y < 0) doc.scroll_y = 0;
+    if (doc.scroll_y > max_scroll) doc.scroll_y = max_scroll;
+    if (doc.cursor_y < doc.scroll_y) doc.cursor_y = doc.scroll_y;
+    if (doc.cursor_y > doc.scroll_y + EDIT_HEIGHT - 1)
+        doc.cursor_y = doc.scroll_y + EDIT_HEIGHT - 1;
+    if (doc.cursor_y >= doc.num_lines) doc.cursor_y = doc.num_lines - 1;
+    ln = doc.lines[doc.cursor_y];
+    ll = ln ? (int)strlen(ln) : 0;
+    if (doc.cursor_x > ll) doc.cursor_x = ll;
+    draw_screen();
+}
+
+/* Map a column on the menu bar (row 0) to a menu index 0..6, or -1.
+ * Boundaries follow the label positions written by draw_menu_bar():
+ * File@1 Edit@7 Search@13 Block@21 Options@28 Tools@37 Help@44. */
+int menubar_hit(int col)
+{
+    if (col < 1)  return -1;
+    if (col < 7)  return 0;   /* File    */
+    if (col < 13) return 1;   /* Edit    */
+    if (col < 21) return 2;   /* Search  */
+    if (col < 28) return 3;   /* Block   */
+    if (col < 37) return 4;   /* Options */
+    if (col < 44) return 5;   /* Tools   */
+    if (col <= 50) return 6;  /* Help    */
+    return -1;                /* mode string at far right */
+}
+
+/* Translate an edit-area text cell (col,row) into a document position
+ * (out_line, out_x where out_x is a raw cursor_x including any inline format
+ * codes). This is the inverse of update_cursor()'s forward mapping, handled
+ * separately for LTR and RTL so the round-trip is exact: the cell where the
+ * caret for logical position p is drawn maps back to p. Does not mutate doc
+ * (only the bidi[] scratch buffer, which draw_screen() recomputes anyway). */
+void cell_to_docpos(int col, int row, int *out_line, int *out_x)
+{
+    int doc_line, clean_x, len, clen;
+    char *line;
+
+    doc_line = doc.scroll_y + (row - EDIT_TOP);
+    if (doc_line < 0) doc_line = 0;
+    if (doc_line >= doc.num_lines) doc_line = doc.num_lines - 1;
+
+    line = doc.lines[doc_line];
+    len = line ? (int)strlen(line) : 0;
+
+    if (doc.rtl_mode) {
+        /* RTL: text is right-aligned to RIGHT_MARGIN; the visual cell range is
+         * [text_start .. text_start+bidi.len-1] and the end-of-line caret sits
+         * one cell to the left (text_start-1), so a click at or left of that
+         * means logical end. */
+        int text_start, vis_pos, blen;
+        if (line && len > 0) bidi_reorder(line, len);
+        else bidi.len = 0;
+        blen = bidi.len;
+        text_start = RIGHT_MARGIN - blen;
+        if (text_start < LEFT_MARGIN) text_start = LEFT_MARGIN;
+        if (blen <= 0 || col <= text_start - 1) {
+            clean_x = blen;
+        } else {
+            vis_pos = col - text_start;
+            if (vis_pos < 0) vis_pos = 0;
+            if (vis_pos >= blen) clean_x = blen;
+            else clean_x = visual_to_logical(vis_pos);
+        }
+    } else {
+        /* LTR: text starts at LEFT_MARGIN, shifted by horizontal scroll. */
+        clean_x = col - LEFT_MARGIN + doc.scroll_x;
+        if (clean_x < 0) clean_x = 0;
+    }
+
+    clen = clean_line_len(line);
+    if (clean_x > clen) clean_x = clen;
+    if (clean_x < 0) clean_x = 0;
+    *out_line = doc_line;
+    *out_x = visible_to_raw_pos(line, clean_x);
+}
+
+/* Handle a left-button press in the edit area: position the caret, then track
+ * the button while it stays down to extend a block selection (drag-select).
+ * The anchor cell becomes block_start; the current cell becomes block_end, in
+ * the same raw cursor coordinates that start_block()/end_block() use, so the
+ * highlight renders exactly like a keyboard selection. A press with no drag
+ * collapses to a plain click (caret moved, no selection). Dragging above or
+ * below the edit area auto-scrolls one line per step. */
+void mouse_select_text(int col, int row)
+{
+    int ax, ay, cx, cy, bcol, brow, buttons;
+    int last_x = -1, last_y = -1;
+
+    cell_to_docpos(col, row, &ay, &ax);
+    doc.cursor_y = ay; doc.cursor_x = ax;
+    doc.block_start_x = ax; doc.block_start_y = ay;
+    doc.block_end_x = ax;   doc.block_end_y = ay;
+    doc.block_active = 0;
+    draw_screen();
+
+    for (;;) {
+        if (!mouse_get_state(&bcol, &brow, &buttons)) break;
+        if (!(buttons & 1)) break;                 /* left button released */
+
+        if (brow < EDIT_TOP) {                     /* drag above -> scroll up */
+            if (doc.scroll_y > 0) doc.scroll_y--;
+            brow = EDIT_TOP;
+        } else if (brow > EDIT_BOTTOM) {           /* drag below -> scroll down */
+            if (doc.scroll_y < doc.num_lines - 1) doc.scroll_y++;
+            brow = EDIT_BOTTOM;
+        }
+
+        cell_to_docpos(bcol, brow, &cy, &cx);
+        if (cx != last_x || cy != last_y) {
+            last_x = cx; last_y = cy;
+            doc.cursor_y = cy; doc.cursor_x = cx;
+            doc.block_end_x = cx; doc.block_end_y = cy;
+            doc.block_active = (cx != ax || cy != ay);
+            draw_screen();
+        }
+        delay(20);
+    }
 }
 
 void init_hebrew_mapping(void)
@@ -1771,6 +2056,167 @@ void do_word_wrap(void)
     }
     
     /* Refresh screen to show the change */
+    draw_screen();
+}
+
+/* ---- Paragraph reflow (QText-style "reformat") -------------------------- *
+ * Re-wraps text to TEXT_WIDTH (71) by joining the lines of each paragraph and
+ * splitting them again at word boundaries. Paragraphs are separated by blank
+ * lines, which are preserved. Operates on logical-order bytes, so it is BiDi-
+ * agnostic; inline FMT toggle codes travel with their words and are skipped
+ * when measuring visible width (same rule as clean_line_len). The buffer is
+ * rebuilt wholesale, so the granular undo stack is cleared afterward.
+ *
+ * Streaming builder state: characters are fed one at a time into `cur` (the
+ * line being built); when it reaches the width limit it is flushed to out[]
+ * and the trailing word (after the last space) carries to the next line. */
+struct reflow_st {
+    char **out;          /* destination line-pointer array (malloc'd lines)  */
+    int   out_n;         /* lines produced so far                            */
+    char  cur[MAX_LINE_LEN];
+    int   cur_len;       /* raw bytes in cur                                 */
+    int   cur_vis;       /* visible columns in cur (FMT codes excluded)      */
+    int   last_sp;       /* raw index in cur of the last space, or -1        */
+    int   overflow;      /* set if MAX_LINES or malloc was hit               */
+};
+
+static int rf_is_fmt(unsigned char ch)
+{
+    return ch == FMT_BOLD || ch == FMT_UNDERLINE || ch == FMT_BOLDUNDER;
+}
+
+static void rf_emit(struct reflow_st *r, const char *buf, int n)
+{
+    char *nl;
+    if (r->overflow) return;
+    if (r->out_n >= MAX_LINES) { r->overflow = 1; return; }
+    if (n > MAX_LINE_LEN - 1) n = MAX_LINE_LEN - 1;
+    nl = (char *)malloc(MAX_LINE_LEN);
+    if (!nl) { r->overflow = 1; return; }
+    memcpy(nl, buf, n);
+    nl[n] = '\0';
+    r->out[r->out_n++] = nl;
+}
+
+static void rf_feed(struct reflow_st *r, unsigned char ch)
+{
+    int fmt = rf_is_fmt(ch);
+
+    /* Collapse runs of spaces and drop leading spaces on a line. */
+    if (ch == ' ') {
+        if (r->cur_len == 0) return;
+        if (r->cur[r->cur_len - 1] == ' ') return;
+    }
+
+    /* If a visible char would overrun the margin, break the current line at
+     * the last space (or hard-break when a single word is wider than the
+     * margin) and carry the remainder to the start of the next line. */
+    if (!fmt && r->cur_vis >= TEXT_WIDTH) {
+        int break_at, next_start, rem, k;
+        if (r->last_sp >= 0) { break_at = r->last_sp; next_start = r->last_sp + 1; }
+        else                 { break_at = r->cur_len; next_start = r->cur_len; }
+        rf_emit(r, r->cur, break_at);
+        rem = r->cur_len - next_start;
+        for (k = 0; k < rem; k++) r->cur[k] = r->cur[next_start + k];
+        r->cur_len = rem;
+        r->cur_vis = 0;
+        r->last_sp = -1;
+        for (k = 0; k < rem; k++) {
+            unsigned char c2 = (unsigned char)r->cur[k];
+            if (c2 == ' ') r->last_sp = k;
+            if (!rf_is_fmt(c2)) r->cur_vis++;
+        }
+        if (ch == ' ' && r->cur_len == 0) return;   /* no leading space */
+    }
+
+    if (r->cur_len < MAX_LINE_LEN - 1) {
+        if (ch == ' ') r->last_sp = r->cur_len;
+        r->cur[r->cur_len++] = (char)ch;
+        if (!fmt) r->cur_vis++;
+    }
+}
+
+void reformat_text(void)
+{
+    struct reflow_st r;
+    int s, e, y, i, oldN, delta;
+    int para_open = 0;
+
+    if (doc.num_lines <= 0) return;
+
+    /* Range: marked block (whole lines) or the entire document. */
+    if (doc.block_active) {
+        s = doc.block_start_y; e = doc.block_end_y;
+        if (s > e) { int t = s; s = e; e = t; }
+    } else {
+        s = 0; e = doc.num_lines - 1;
+    }
+    if (s < 0) s = 0;
+    if (e >= doc.num_lines) e = doc.num_lines - 1;
+    if (s > e) return;
+
+    if (!confirm_dialog("Reformat",
+            doc.block_active ? "Reflow marked block? (cannot undo)"
+                             : "Reflow whole document? (cannot undo)"))
+        return;
+
+    r.out = (char **)malloc(MAX_LINES * sizeof(char *));
+    if (!r.out) return;
+    r.out_n = 0; r.cur_len = 0; r.cur_vis = 0; r.last_sp = -1; r.overflow = 0;
+
+    for (y = s; y <= e; y++) {
+        char *ln = doc.lines[y];
+        if (clean_line_len(ln) == 0) {           /* blank = paragraph break  */
+            if (para_open) {
+                rf_emit(&r, r.cur, r.cur_len);
+                r.cur_len = 0; r.cur_vis = 0; r.last_sp = -1; para_open = 0;
+            }
+            rf_emit(&r, "", 0);                  /* preserve the blank line  */
+        } else {
+            if (para_open) rf_feed(&r, ' ');     /* join with previous line  */
+            for (i = 0; ln[i]; i++) rf_feed(&r, (unsigned char)ln[i]);
+            para_open = 1;
+        }
+        if (r.overflow) break;
+    }
+    if (para_open && !r.overflow) rf_emit(&r, r.cur, r.cur_len);
+    if (r.out_n == 0 && !r.overflow) rf_emit(&r, "", 0);
+
+    oldN = e - s + 1;
+    delta = r.out_n - oldN;
+
+    if (r.overflow || doc.num_lines + delta > MAX_LINES) {
+        for (i = 0; i < r.out_n; i++) free(r.out[i]);
+        free(r.out);
+        draw_screen();
+        return;
+    }
+
+    /* Splice out[0..out_n) in place of doc.lines[s..e]. */
+    for (y = s; y <= e; y++) if (doc.lines[y]) free(doc.lines[y]);
+    if (delta > 0) {
+        for (i = doc.num_lines - 1; i > e; i--) doc.lines[i + delta] = doc.lines[i];
+    } else if (delta < 0) {
+        for (i = e + 1; i < doc.num_lines; i++) doc.lines[i + delta] = doc.lines[i];
+    }
+    for (i = 0; i < r.out_n; i++) doc.lines[s + i] = r.out[i];
+    doc.num_lines += delta;
+    free(r.out);
+
+    if (doc.num_lines < 1) {
+        doc.lines[0] = (char *)malloc(MAX_LINE_LEN);
+        if (doc.lines[0]) doc.lines[0][0] = '\0';
+        doc.num_lines = 1;
+    }
+
+    /* The line restructure invalidates granular undo and block coords. */
+    clear_undo_stack();
+    doc.block_active = 0;
+    if (doc.cursor_y >= doc.num_lines) doc.cursor_y = doc.num_lines - 1;
+    if (doc.cursor_y < 0) doc.cursor_y = 0;
+    doc.cursor_x = 0;
+    if (doc.scroll_y > doc.cursor_y) doc.scroll_y = doc.cursor_y;
+    doc.modified = 1;
     draw_screen();
 }
 
@@ -3552,19 +3998,82 @@ void assist_paste_clipboard(void)
 
 /* =========== Menu Functions =========== */
 
-void show_file_menu(void) { int x1 = 0, y1 = 1, w = 22, h = 12, sel = 0, key, i; char fn[256]; const char *items[] = {"New","Open          F3","Save          F2","Save As...","Save Encrypted...","Remove Password...","Print","----------------------","Exit       Alt+X"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 9; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 8; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 8) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_help_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_edit_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: new_document(); break; case 1: fn[0] = '\0'; if (file_dialog("Open File", fn, sizeof(fn), 0)) load_file(fn); draw_screen(); break; case 2: if (doc.encrypted) save_file_encrypted(doc.filename, doc.password); else save_file(doc.filename); draw_screen(); break; case 3: save_file_as(); draw_screen(); break; case 4: save_with_password(); draw_screen(); break; case 5: remove_password(); draw_screen(); break; case 6: print_document(); break; case 8: running = 0; break; } return; } } draw_screen(); }
+/* Blocking input for an open dropdown menu: returns a keystroke exactly like
+ * getch() (so the caller's existing extended-key handling is unchanged), OR
+ * translates a mouse click into the menu's own vocabulary:
+ *   - click an item row  -> set *sel to that item and return KEY_ENTER
+ *   - click a separator  -> ignored (keep waiting)
+ *   - click another bar title -> set g_menu_jump and return KEY_ESC (switch)
+ *   - click anywhere else -> return KEY_ESC (close)
+ * Items occupy rows y1+1..y1+nitems, columns x1+1..x2-1. */
+int menu_input(int which, int x1, int y1, int x2, int y2, int nitems, int *sel)
+{
+    int col, row, idx;
+    (void)y2;
+    mouse_show();
+    for (;;) {
+        if (kbhit()) { mouse_hide(); return getch(); }
+        if (mouse_get_press(&col, &row)) {
+            if (row == 0) {                       /* menu bar: switch or close */
+                int j = menubar_hit(col);
+                mouse_hide();
+                if (j >= 0 && j != which) g_menu_jump = j;
+                return KEY_ESC;
+            }
+            if (row >= y1 + 1 && row <= y1 + nitems && col > x1 && col < x2) {
+                idx = row - (y1 + 1);
+                /* skip separator rows (their first cell holds '-') */
+                if ((unsigned char)video_mem[(row * SCREEN_WIDTH + (x1 + 1)) * 2] != '-') {
+                    *sel = idx;
+                    mouse_hide();
+                    return KEY_ENTER;
+                }
+                continue;                         /* separator: ignore click  */
+            }
+            mouse_hide();                         /* click outside the box     */
+            return KEY_ESC;
+        }
+        delay(15);
+    }
+}
 
-void show_edit_menu(void) { int x1 = 6, y1 = 1, w = 18, h = 10, sel = 0, key, i; const char *items[] = {"Undo      Ctrl+Z","Redo      Ctrl+Y","------------------","Cut","Copy","Paste","Delete Line","Select All"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 7; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 7) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_file_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_search_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: undo_action(); break; case 1: redo_action(); break; case 3: cut_block(); break; case 4: copy_block(); break; case 5: paste_block(); break; case 6: delete_line(); draw_screen(); break; case 7: doc.block_active = 1; doc.block_start_x = 0; doc.block_start_y = 0; doc.block_end_y = doc.num_lines - 1; doc.block_end_x = strlen(doc.lines[doc.num_lines - 1]); draw_screen(); break; } return; } } draw_screen(); }
+/* Single entry point for opening a top-bar menu (used by both the Alt-key
+ * handlers and menu-bar mouse clicks). Loops so that clicking a different bar
+ * title while a menu is open (which sets g_menu_jump) reopens that menu. */
+void run_menu(int which)
+{
+    mouse_hide();
+    mouse_flush();
+    g_menu_jump = which;
+    while (g_menu_jump >= 0) {
+        int j = g_menu_jump;
+        g_menu_jump = -1;
+        switch (j) {
+            case 0: show_file_menu();    break;
+            case 1: show_edit_menu();    break;
+            case 2: show_search_menu();  break;
+            case 3: show_block_menu();   break;
+            case 4: show_options_menu(); break;
+            case 5: show_tools_menu();   break;
+            case 6: show_help_menu();    break;
+        }
+    }
+    mouse_flush();
+}
 
-void show_search_menu(void) { int x1 = 12, y1 = 1, w = 20, h = 8, sel = 0, key, i; const char *items[] = {"Find         F7","Find Next","Find Previous","Replace      F8","Replace All","Go to Line"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 6; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 5; } if (key == KEY_DOWN) { sel++; if (sel > 5) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_edit_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_block_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: do_search(); break; case 1: find_next(); break; case 2: find_prev(); break; case 3: do_replace(); break; case 4: do_replace_all(); break; case 5: goto_line(); break; } return; } } draw_screen(); }
+void show_file_menu(void) { int x1 = 0, y1 = 1, w = 22, h = 12, sel = 0, key, i; char fn[256]; const char *items[] = {"New","Open          F3","Save          F2","Save As...","Save Encrypted...","Remove Password...","Print","----------------------","Exit       Alt+X"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 9; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(0, x1, y1, x1 + w, y1 + h, 9, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 8; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 8) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_help_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_edit_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: new_document(); break; case 1: fn[0] = '\0'; if (file_dialog("Open File", fn, sizeof(fn), 0)) load_file(fn); draw_screen(); break; case 2: if (doc.encrypted) save_file_encrypted(doc.filename, doc.password); else save_file(doc.filename); draw_screen(); break; case 3: save_file_as(); draw_screen(); break; case 4: save_with_password(); draw_screen(); break; case 5: remove_password(); draw_screen(); break; case 6: print_document(); break; case 8: running = 0; break; } return; } } draw_screen(); }
 
-void show_block_menu(void) { int x1 = 21, y1 = 1, w = 18, h = 8, sel = 0, key, i; const char *items[] = {"Start Block F6","End Block","Copy Block","Move Block","Delete Block","Unmark Block"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 6; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 5; } if (key == KEY_DOWN) { sel++; if (sel > 5) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_search_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_options_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: start_block(); break; case 1: end_block(); break; case 2: copy_block(); break; case 3: cut_block(); paste_block(); break; case 4: delete_block(); break; case 5: unselect_block(); break; } return; } } draw_screen(); }
+void show_edit_menu(void) { int x1 = 6, y1 = 1, w = 18, h = 10, sel = 0, key, i; const char *items[] = {"Undo      Ctrl+Z","Redo      Ctrl+Y","------------------","Cut","Copy","Paste","Delete Line","Select All"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(1, x1, y1, x1 + w, y1 + h, 8, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 7; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 7) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_file_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_search_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: undo_action(); break; case 1: redo_action(); break; case 3: cut_block(); break; case 4: copy_block(); break; case 5: paste_block(); break; case 6: delete_line(); draw_screen(); break; case 7: doc.block_active = 1; doc.block_start_x = 0; doc.block_start_y = 0; doc.block_end_y = doc.num_lines - 1; doc.block_end_x = strlen(doc.lines[doc.num_lines - 1]); draw_screen(); break; } return; } } draw_screen(); }
 
-void show_options_menu(void) { int x1 = 29, y1 = 1, w = 22, h = 10, sel = 0, key, i; char items[8][25]; const char *langname; while (1) { langname = (doc.input_lang == LANG_HEB) ? "Hebrew" : (doc.input_lang == LANG_ARA) ? "Arabic" : (doc.input_lang == LANG_RUS) ? "Russian" : "English"; sprintf(items[0], "Lang: %-7s    F4", langname); sprintf(items[1], "[%c] Embed English F10", doc.embedded_ltr ? 'X' : ' '); sprintf(items[2], "[%c] RTL Mode       F5", doc.rtl_mode ? 'X' : ' '); sprintf(items[3], "[%c] Word Wrap", doc.word_wrap ? 'X' : ' '); sprintf(items[4], "[%c] Show Ruler", doc.show_ruler ? 'X' : ' '); sprintf(items[5], "[%c] Insert Mode   Ins", doc.insert_mode ? 'X' : ' '); sprintf(items[6], "[%c] Save Reminder 10m", doc.save_reminder ? 'X' : ' '); strcpy(items[7], "----------------------"); draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 6; } while (sel == 7); } if (key == KEY_DOWN) { do { sel++; if (sel > 6) sel = 0; } while (sel == 7); } if (key == KEY_LEFT) { draw_screen(); show_block_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_tools_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER || key == ' ') { switch (sel) { case 0: cycle_input_lang(); break; case 1: toggle_embedded_ltr(); break; case 2: toggle_rtl(); break; case 3: toggle_wrap(); break; case 4: doc.show_ruler = !doc.show_ruler; draw_screen(); break; case 5: toggle_insert(); break; case 6: toggle_save_reminder(); break; } } } draw_screen(); }
+void show_search_menu(void) { int x1 = 12, y1 = 1, w = 20, h = 8, sel = 0, key, i; const char *items[] = {"Find         F7","Find Next","Find Previous","Replace      F8","Replace All","Go to Line"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 6; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(2, x1, y1, x1 + w, y1 + h, 6, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 5; } if (key == KEY_DOWN) { sel++; if (sel > 5) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_edit_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_block_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: do_search(); break; case 1: find_next(); break; case 2: find_prev(); break; case 3: do_replace(); break; case 4: do_replace_all(); break; case 5: goto_line(); break; } return; } } draw_screen(); }
 
-void show_tools_menu(void) { int x1 = 37, y1 = 1, w = 24, h = 12, sel = 0, key, i; const char *items[] = {"Word Count","Go To Line","Insert Date/Time","----------------------","Spell Check (Eng)","Read Aloud","Stop Speech","Translate to Hebrew","Dictate (Speech)","Paste Host   Alt+V"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 10; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 9; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 9) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_options_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_help_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: word_count(); break; case 1: goto_line(); break; case 2: insert_date_time(); break; case 4: assist_spell_check(); break; case 5: assist_read_aloud(); break; case 6: assist_stop_speech(); break; case 7: assist_translate(); break; case 8: assist_dictate(); break; case 9: assist_paste_clipboard(); break; } return; } } draw_screen(); }
+void show_block_menu(void) { int x1 = 21, y1 = 1, w = 18, h = 9, sel = 0, key, i; const char *items[] = {"Start Block F6","End Block","Copy Block","Move Block","Delete Block","Unmark Block","Reformat"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 7; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(3, x1, y1, x1 + w, y1 + h, 7, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 6; } if (key == KEY_DOWN) { sel++; if (sel > 6) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_search_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_options_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: start_block(); break; case 1: end_block(); break; case 2: copy_block(); break; case 3: cut_block(); paste_block(); break; case 4: delete_block(); break; case 5: unselect_block(); break; case 6: reformat_text(); break; } return; } } draw_screen(); }
 
-void show_help_menu(void) { int x1 = 44, y1 = 1, w = 14, h = 5, sel = 0, key, i; const char *items[] = {"Help     F1","Docs...","About..."}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 3; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = getch(); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 2; } if (key == KEY_DOWN) { sel++; if (sel > 2) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_tools_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_file_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: show_help(); break; case 1: show_docs(); break; case 2: show_about(); break; } return; } } draw_screen(); }
+void show_options_menu(void) { int x1 = 29, y1 = 1, w = 22, h = 10, sel = 0, key, i; char items[8][25]; const char *langname; while (1) { langname = (doc.input_lang == LANG_HEB) ? "Hebrew" : (doc.input_lang == LANG_ARA) ? "Arabic" : (doc.input_lang == LANG_RUS) ? "Russian" : "English"; sprintf(items[0], "Lang: %-7s    F4", langname); sprintf(items[1], "[%c] Embed English F10", doc.embedded_ltr ? 'X' : ' '); sprintf(items[2], "[%c] RTL Mode       F5", doc.rtl_mode ? 'X' : ' '); sprintf(items[3], "[%c] Word Wrap", doc.word_wrap ? 'X' : ' '); sprintf(items[4], "[%c] Show Ruler", doc.show_ruler ? 'X' : ' '); sprintf(items[5], "[%c] Insert Mode   Ins", doc.insert_mode ? 'X' : ' '); sprintf(items[6], "[%c] Save Reminder 10m", doc.save_reminder ? 'X' : ' '); strcpy(items[7], "----------------------"); draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(4, x1, y1, x1 + w, y1 + h, 8, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 6; } while (sel == 7); } if (key == KEY_DOWN) { do { sel++; if (sel > 6) sel = 0; } while (sel == 7); } if (key == KEY_LEFT) { draw_screen(); show_block_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_tools_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER || key == ' ') { switch (sel) { case 0: cycle_input_lang(); break; case 1: toggle_embedded_ltr(); break; case 2: toggle_rtl(); break; case 3: toggle_wrap(); break; case 4: doc.show_ruler = !doc.show_ruler; draw_screen(); break; case 5: toggle_insert(); break; case 6: toggle_save_reminder(); break; } } } draw_screen(); }
+
+void show_tools_menu(void) { int x1 = 37, y1 = 1, w = 24, h = 12, sel = 0, key, i; const char *items[] = {"Word Count","Go To Line","Insert Date/Time","----------------------","Spell Check (Eng)","Read Aloud","Stop Speech","Translate to Hebrew","Dictate (Speech)","Paste Host   Alt+V"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 10; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(5, x1, y1, x1 + w, y1 + h, 10, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 9; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 9) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_options_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_help_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: word_count(); break; case 1: goto_line(); break; case 2: insert_date_time(); break; case 4: assist_spell_check(); break; case 5: assist_read_aloud(); break; case 6: assist_stop_speech(); break; case 7: assist_translate(); break; case 8: assist_dictate(); break; case 9: assist_paste_clipboard(); break; } return; } } draw_screen(); }
+
+void show_help_menu(void) { int x1 = 44, y1 = 1, w = 14, h = 5, sel = 0, key, i; const char *items[] = {"Help     F1","Docs...","About..."}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 3; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(6, x1, y1, x1 + w, y1 + h, 3, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 2; } if (key == KEY_DOWN) { sel++; if (sel > 2) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_tools_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_file_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: show_help(); break; case 1: show_docs(); break; case 2: show_about(); break; } return; } } draw_screen(); }
 
 /* =========== Main Key Processing =========== */
 
@@ -3606,13 +4115,13 @@ void process_key(int key, int extended)
             case KEY_F8: do_replace(); break;
             case KEY_F9: paste_block(); break;
             case KEY_F10: toggle_embedded_ltr(); draw_screen(); break;
-            case KEY_ALT_F: show_file_menu(); break;
-            case KEY_ALT_E: show_edit_menu(); break;
-            case KEY_ALT_S: show_search_menu(); break;
-            case KEY_ALT_B: show_block_menu(); break;
-            case KEY_ALT_O: show_options_menu(); break;
-            case KEY_ALT_T: show_tools_menu(); break;
-            case KEY_ALT_H: show_help_menu(); break;
+            case KEY_ALT_F: run_menu(0); break;
+            case KEY_ALT_E: run_menu(1); break;
+            case KEY_ALT_S: run_menu(2); break;
+            case KEY_ALT_B: run_menu(3); break;
+            case KEY_ALT_O: run_menu(4); break;
+            case KEY_ALT_T: run_menu(5); break;
+            case KEY_ALT_H: run_menu(6); break;
             case KEY_ALT_X: running = 0; break;
             case KEY_ALT_L: toggle_underline(); break;
             case KEY_ALT_U: toggle_boldunder(); break;
@@ -3728,11 +4237,12 @@ int main(int argc, char *argv[])
     }
 
     init_editor();
+    mouse_init();
     if (g_ascii_boxes) doc.input_lang = LANG_ARA;
     if (g_russian_start) { doc.input_lang = LANG_RUS; doc.rtl_mode = 0; }
     if (file_arg) load_file(file_arg);
     draw_screen();
-    
+
     while (running) {
         /* Check save reminder when no key is pressed */
         if (!kbhit()) {
@@ -3748,14 +4258,32 @@ int main(int argc, char *argv[])
                     }
                 }
             }
-            /* Update status bar (for clock) */
+            /* Update status bar (for clock). Hide the mouse pointer first so
+             * the direct video writes don't smear it, then handle any click
+             * and re-show the pointer while we idle. */
+            if (g_mouse_present) mouse_hide();
             draw_status_bar();
             update_cursor();
+            if (g_mouse_present) {
+                int mcol, mrow, wheel;
+                if (mouse_get_press(&mcol, &mrow)) {
+                    if (mrow == 0) {                 /* click on the menu bar */
+                        int j = menubar_hit(mcol);
+                        if (j >= 0) { run_menu(j); draw_screen(); continue; }
+                    } else if (mrow >= EDIT_TOP && mrow <= EDIT_BOTTOM) {
+                        mouse_select_text(mcol, mrow); /* caret + drag-select */
+                    }
+                }
+                wheel = mouse_get_wheel();
+                if (wheel != 0) mouse_wheel_scroll(wheel);
+                mouse_show();
+            }
             /* Small delay to avoid 100% CPU usage */
             delay(100);
             continue;
         }
-        
+
+        if (g_mouse_present) mouse_hide();   /* pointer off while typing */
         key = get_key();
         if (key & 0x100)
             process_key(key, 1);

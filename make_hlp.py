@@ -86,7 +86,7 @@ def write_hlp(path: str, text: str) -> None:
 
 HEADER = """\
 ============================================================
-            OPENQT v3.6.0 - USER GUIDE
+            OPENQT v3.8.0 - USER GUIDE
 ============================================================
 
 ENGLISH GUIDE
@@ -133,6 +133,22 @@ SMART PASTE (v3.5):
   Use this instead of the emulator clipboard paste for
   Hebrew/Arabic/Russian. Needs the host helper running.
 
+MOUSE (v3.7):
+  Needs a DOS mouse driver (DOSBox/DOSBox-X provide one).
+  Click a top menu title to open it, click an item to run
+  it. Click in the text to move the cursor (works in RTL).
+  Press and drag to select a block, then Copy/Cut from the
+  Edit or Block menu. Roll the wheel to scroll. Without a
+  driver the mouse is inert and the keyboard still works.
+
+REFORMAT (v3.8):
+  Block -> Reformat re-wraps text to the column-71 margin:
+  short lines are joined, long lines re-split at word
+  boundaries, blank lines kept as paragraph breaks. Acts on
+  a marked block if one is set, else the whole document.
+  Handy for converted QText files or pasted text whose
+  lines run off-screen. Cannot be undone (asks to confirm).
+
 ENCRYPTION:
   File menu -> Save Encrypted -> enter password.
   Magic header OQT-ENC1 marks the file.
@@ -174,6 +190,9 @@ HEBREW_SECTION = """\
 תמיכה בכיוון טקסט, סופיות אוטומטיות,
 חיפוש החלפה, ססמאות, בלוקים.
 
+סידור טקסט מחדש לרוחב העמודה:
+תפריט בלוק ואז Reformat.
+
 לחזור למסמך הראשי הקש ESC.
 """
 
@@ -197,6 +216,9 @@ ARABIC_SECTION = """\
 
 تشكيل عربي كامل واتصال الحروف
 دعم الارقام العربية والعلامات.
+
+اعادة تنسيق الفقرات الى عرض العمود:
+قائمة بلوك ثم Reformat.
 
 اضغط ESC للعودة للمستند.
 """
@@ -229,6 +251,10 @@ RUSSIAN_SECTION = """\
   txt2oqt  /R utf8.txt вход.txt
 Флаг /R обязателен для русских документов так как
 байтовые диапазоны КП866 пересекаются с КП862 и КП864.
+
+ПЕРЕФОРМАТИРОВАНИЕ:
+  Меню Block, пункт Reformat - перенос строк по
+  ширине столбца 71. Действует на блок или весь текст.
 
 Нажмите ESC для возврата в документ.
 """

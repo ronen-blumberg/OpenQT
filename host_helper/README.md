@@ -1,15 +1,18 @@
 # OpenQT host helper — speech, spell check, and translation
 
-These four editor features run **on the Linux host**, not inside DOS, because
-DOS/DOSBox has no microphone input, no speech engine, and no network TLS:
+These editor features run **on the host** (Linux, Windows, or macOS), not inside
+DOS, because DOS/DOSBox has no microphone input, no speech engine, and no network
+TLS. The daemon is cross-platform — it picks a per-OS implementation for the only
+three things that touch the host (clipboard read, audio playback, mic capture):
 
 | Tools-menu item (Alt+T) | Host tool | Notes |
 |---|---|---|
 | **Spell Check (Eng)** | `aspell` | Interactive, English. Walks flagged words; pick a suggestion (1-9), S=skip, Esc=stop. |
-| **Read Aloud** | `espeak-ng` | Speaks the selection (or whole document) on the host speakers. English/Hebrew/Arabic/Russian by current input language (F4). |
+| **Read Aloud** | `espeak-ng` + OS player | Speaks the selection (or whole document) on the host speakers. English/Hebrew/Arabic/Russian by current input language (F4). Playback: PowerShell (Windows) / afplay (macOS) / paplay·aplay·ffplay (Linux). |
 | **Stop Speech** | — | Stops playback. |
 | **Translate to Hebrew** | `deep-translator` (Google, online) | Translates selection/document English→Hebrew, inserts the Hebrew at the cursor. Needs internet. |
-| **Dictate (Speech)** | `arecord` + `faster-whisper` | Records from the host mic, transcribes English, inserts at the cursor. |
+| **Dictate (Speech)** | `sounddevice` (or `arecord`/`rec`) + `faster-whisper` | Records from the host mic, transcribes, inserts at the cursor. |
+| **Smart Paste / Paste Host** | clipboard reader | Reads the host clipboard as UTF-8 and converts to OpenQT codepage bytes. Windows: ctypes (built in); macOS: `pbpaste`; Linux: `wl-paste`/`xclip`/`xsel`. |
 
 ## How it works
 
@@ -26,12 +29,24 @@ Neither the Python virtualenv nor the speech model is committed to the repo —
 recreate both on the host:
 
 ```bash
+# Linux / macOS
 python3 -m venv host_helper/venv
 host_helper/venv/bin/pip install -r host_helper/requirements.txt
 ```
 
-`aspell`, `espeak-ng`, and `arecord`/`xclip` come from the system package
-manager, not pip.
+```bat
+rem Windows
+python -m venv host_helper\venv
+host_helper\venv\Scripts\pip install -r host_helper\requirements.txt
+```
+
+`aspell` and `espeak-ng` come from the system package manager, not pip
+(see `requirements.txt` for per-OS install hints). Mic capture uses the
+`sounddevice` pip package on every OS (with an `arecord`/`sox` fallback on
+Linux); audio playback and clipboard read need nothing extra (built-in OS
+facilities). Spell Check and Read Aloud degrade gracefully — if `aspell` or
+`espeak-ng` isn't on PATH the menu item just reports "not installed" and the
+rest of the editor is unaffected.
 
 **Dictation model.** Dictate uses faster-whisper. It **must be a multilingual
 model** — an English-only `.en` model cannot transcribe Hebrew at all. The
@@ -49,10 +64,23 @@ for f in model.bin config.json tokenizer.json vocabulary.txt; do
 done
 ```
 
+On Windows, do the same with PowerShell (`curl` there is an alias for
+`Invoke-WebRequest`):
+
+```powershell
+mkdir host_helper\models\faster-whisper-medium
+cd host_helper\models\faster-whisper-medium
+$base = "https://huggingface.co/Systran/faster-whisper-medium/resolve/main"
+foreach ($f in "model.bin","config.json","tokenizer.json","vocabulary.txt") {
+  Invoke-WebRequest "$base/$f" -OutFile $f
+}
+```
+
 Use `curl -C -` (resumable) rather than the Hub downloader, which rate-limits
 and uses a non-resumable `.incomplete` temp name. There is no
 `preprocessor_config.json` in that repo, so skip it. If the folder is absent,
 the daemon falls back to downloading `medium` from the Hub on first use.
+`run_helper.bat` auto-detects the same `models\faster-whisper-medium\` folder.
 
 ## Running
 
@@ -60,7 +88,11 @@ Start the daemon on the host **before** launching the editor, and leave it
 running in its own terminal:
 
 ```bash
-./host_helper/run_helper.sh
+./host_helper/run_helper.sh        # Linux / macOS
+```
+
+```bat
+host_helper\run_helper.bat         rem Windows
 ```
 
 Then launch OpenQT as usual (e.g. `OQT 3`). The four features appear under the

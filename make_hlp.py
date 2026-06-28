@@ -86,7 +86,7 @@ def write_hlp(path: str, text: str) -> None:
 
 HEADER = """\
 ============================================================
-            OPENQT v3.8.0 - USER GUIDE
+            OPENQT v3.9.0 - USER GUIDE
 ============================================================
 
 ENGLISH GUIDE
@@ -104,7 +104,8 @@ KEY COMMANDS:
   F8   Replace         F9  Paste block    F10 Embed LTR
   Ctrl+B Bold          Ctrl+U Underline
   Ctrl+Z Undo          Ctrl+Y Redo
-  Alt+V  Paste host     Alt+X  Exit
+  Alt+V  Paste host     Alt+C  Copy to host
+  Alt+X  Exit
 
 LAUNCHERS:
   OQT 3 file   Trilingual (Hebrew + Arabic + English)
@@ -148,6 +149,19 @@ REFORMAT (v3.8):
   a marked block if one is set, else the whole document.
   Handy for converted QText files or pasted text whose
   lines run off-screen. Cannot be undone (asks to confirm).
+
+SPELL CHECK (v3.9):
+  Tools -> Spell Check follows the F4 language. English uses
+  aspell; Hebrew uses hspell (or aspell's Hebrew dictionary).
+  Misspelled words are flagged with suggestions; embedded
+  English in a Hebrew document is left alone. Arabic/Russian
+  have no bundled engine. Needs the host helper running.
+
+COPY TO HOST (v3.9):
+  Tools -> Copy to Host, or Alt+C. Sends the marked block
+  (or the whole document) to the host clipboard as UTF-8, so
+  Hebrew/Arabic/Russian text pastes into any host app. The
+  outbound mirror of Smart Paste. Needs the host helper.
 
 ENCRYPTION:
   File menu -> Save Encrypted -> enter password.
@@ -268,7 +282,8 @@ End of guide.   ESC closes.   See README.md for full details.
 
 
 if __name__ == "__main__":
-    base = '/home/ronen/dos/eini2/OPENQT/'
+    import os
+    base = os.path.dirname(os.path.abspath(__file__)) + '/'
     write_hlp(base + 'OPENQT.HLP',
               HEADER + HEBREW_SECTION + ARABIC_SECTION + FOOTER)
     write_hlp(base + 'OPENQTH.HLP',

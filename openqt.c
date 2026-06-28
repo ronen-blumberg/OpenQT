@@ -1,7 +1,18 @@
 /*
  * OpenQT - Open Source Hebrew/English/Arabic/Russian Word Processor
  * A QText 5.5 Clone for DOS
- * Version 3.8.0
+ * Version 3.9.0
+ *
+ * Changes in 3.9:
+ *   - Hebrew spell check. Tools -> Spell Check now follows the F4 input
+ *     language: English via aspell, Hebrew via hspell (falling back to
+ *     aspell's Hebrew dictionary where hspell is unavailable). Embedded
+ *     English in a Hebrew document is not flagged.
+ *   - Copy to Host (Alt+C): send the selection (or whole document) to the
+ *     host OS clipboard as UTF-8 - the outbound mirror of Paste Host (Alt+V).
+ *   - Fix: Open (File menu / F3) now warns before discarding unsaved changes.
+ *   - Fix: Edit -> Select All now works with Copy (the caret is moved to the
+ *     end of the document so the whole-document block copies correctly).
  *
  * Changes in 3.7:
  *   - Mouse support (INT 33h; DOSBox/DOSBox-X provide the driver). Click the
@@ -92,7 +103,7 @@
 #include <time.h>
 #include <direct.h>
 
-#define VERSION         "3.8.0"
+#define VERSION         "3.9.0"
 #define MAX_LINES       30000  /* ~500 pages */
 #define MAX_LINE_LEN    256
 #define SAVE_REMIND_SEC 600   /* Save reminder interval in seconds (600 = 10 min) */
@@ -174,6 +185,7 @@
 #define KEY_ALT_L       38
 #define KEY_ALT_B_FMT   48
 #define KEY_ALT_V       47
+#define KEY_ALT_C       46
 
 /* Host helper bridge (speech/spell/translate via the Linux host daemon).
  * Paths are absolute on the DOSBox C: mount (c: = /home/ronen/dos/eini2). */
@@ -484,6 +496,7 @@ void assist_translate(void);
 void assist_spell_check(void);
 void assist_dictate(void);
 void assist_paste_clipboard(void);
+void assist_copy_clipboard(void);
 
 char *stristr(const char *haystack, const char *needle)
 {
@@ -3863,7 +3876,7 @@ void assist_spell_check(void)
     plen = gather_doc_text(payload, BRIDGE_BUF);
     if (plen <= 0) { free(payload); free(resp); free(finds); show_dialog("Spell Check", "Nothing to check."); return; }
     show_busy("Checking spelling...");
-    r = bridge_request("SPELL", "EN", payload, plen, resp, BRIDGE_BUF, 30);
+    r = bridge_request("SPELL", cur_lang_hint(), payload, plen, resp, BRIDGE_BUF, 30);
     if (r < 0) {
         if (r != -2) show_dialog("Spell Check", bridge_err(r, resp));
         free(payload); free(resp); free(finds); draw_screen(); return;
@@ -3996,6 +4009,31 @@ void assist_paste_clipboard(void)
     draw_screen();
 }
 
+/* Copy to Host (CLIPSET): send the selection (or whole document) to the host
+ * clipboard. The daemon converts our codepage bytes to UTF-8, so the text is
+ * pasteable into any host app -- the outbound mirror of assist_paste_clipboard. */
+void assist_copy_clipboard(void)
+{
+    char *payload, resp[256];
+    int plen, r, sel;
+    payload = (char *)malloc(BRIDGE_BUF);
+    if (!payload) { show_dialog("Copy to Host", "Out of memory."); return; }
+    plen = gather_doc_text(payload, BRIDGE_BUF);
+    if (plen <= 0) { free(payload); show_dialog("Copy to Host", "Nothing to copy."); return; }
+    sel = doc.block_active &&
+          !(doc.block_start_x == doc.block_end_x && doc.block_start_y == doc.block_end_y);
+    show_busy("Copying to host clipboard...");
+    r = bridge_request("CLIPSET", cur_lang_hint(), payload, plen, resp, sizeof(resp), 15);
+    free(payload);
+    if (r < 0) {
+        if (r != -2) show_dialog("Copy to Host", bridge_err(r, resp));
+        draw_screen(); return;
+    }
+    draw_screen();
+    show_dialog("Copy to Host", sel ? "Selection copied to host clipboard."
+                                     : "Document copied to host clipboard.");
+}
+
 /* =========== Menu Functions =========== */
 
 /* Blocking input for an open dropdown menu: returns a keystroke exactly like
@@ -4061,9 +4099,9 @@ void run_menu(int which)
     mouse_flush();
 }
 
-void show_file_menu(void) { int x1 = 0, y1 = 1, w = 22, h = 12, sel = 0, key, i; char fn[256]; const char *items[] = {"New","Open          F3","Save          F2","Save As...","Save Encrypted...","Remove Password...","Print","----------------------","Exit       Alt+X"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 9; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(0, x1, y1, x1 + w, y1 + h, 9, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 8; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 8) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_help_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_edit_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: new_document(); break; case 1: fn[0] = '\0'; if (file_dialog("Open File", fn, sizeof(fn), 0)) load_file(fn); draw_screen(); break; case 2: if (doc.encrypted) save_file_encrypted(doc.filename, doc.password); else save_file(doc.filename); draw_screen(); break; case 3: save_file_as(); draw_screen(); break; case 4: save_with_password(); draw_screen(); break; case 5: remove_password(); draw_screen(); break; case 6: print_document(); break; case 8: running = 0; break; } return; } } draw_screen(); }
+void show_file_menu(void) { int x1 = 0, y1 = 1, w = 22, h = 12, sel = 0, key, i; char fn[256]; const char *items[] = {"New","Open          F3","Save          F2","Save As...","Save Encrypted...","Remove Password...","Print","----------------------","Exit       Alt+X"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 9; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(0, x1, y1, x1 + w, y1 + h, 9, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 8; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 8) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_help_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_edit_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: new_document(); break; case 1: if (!doc.modified || confirm_dialog("Open File", "Discard changes?")) { fn[0] = '\0'; if (file_dialog("Open File", fn, sizeof(fn), 0)) load_file(fn); } draw_screen(); break; case 2: if (doc.encrypted) save_file_encrypted(doc.filename, doc.password); else save_file(doc.filename); draw_screen(); break; case 3: save_file_as(); draw_screen(); break; case 4: save_with_password(); draw_screen(); break; case 5: remove_password(); draw_screen(); break; case 6: print_document(); break; case 8: running = 0; break; } return; } } draw_screen(); }
 
-void show_edit_menu(void) { int x1 = 6, y1 = 1, w = 18, h = 10, sel = 0, key, i; const char *items[] = {"Undo      Ctrl+Z","Redo      Ctrl+Y","------------------","Cut","Copy","Paste","Delete Line","Select All"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(1, x1, y1, x1 + w, y1 + h, 8, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 7; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 7) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_file_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_search_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: undo_action(); break; case 1: redo_action(); break; case 3: cut_block(); break; case 4: copy_block(); break; case 5: paste_block(); break; case 6: delete_line(); draw_screen(); break; case 7: doc.block_active = 1; doc.block_start_x = 0; doc.block_start_y = 0; doc.block_end_y = doc.num_lines - 1; doc.block_end_x = strlen(doc.lines[doc.num_lines - 1]); draw_screen(); break; } return; } } draw_screen(); }
+void show_edit_menu(void) { int x1 = 6, y1 = 1, w = 18, h = 10, sel = 0, key, i; const char *items[] = {"Undo      Ctrl+Z","Redo      Ctrl+Y","------------------","Cut","Copy","Paste","Delete Line","Select All"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(1, x1, y1, x1 + w, y1 + h, 8, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 7; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 7) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_file_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_search_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: undo_action(); break; case 1: redo_action(); break; case 3: cut_block(); break; case 4: copy_block(); break; case 5: paste_block(); break; case 6: delete_line(); draw_screen(); break; case 7: doc.block_active = 1; doc.block_start_x = 0; doc.block_start_y = 0; doc.block_end_y = doc.num_lines - 1; doc.block_end_x = strlen(doc.lines[doc.num_lines - 1]); doc.cursor_y = doc.block_end_y; doc.cursor_x = doc.block_end_x; draw_screen(); break; } return; } } draw_screen(); }
 
 void show_search_menu(void) { int x1 = 12, y1 = 1, w = 20, h = 8, sel = 0, key, i; const char *items[] = {"Find         F7","Find Next","Find Previous","Replace      F8","Replace All","Go to Line"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 6; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(2, x1, y1, x1 + w, y1 + h, 6, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 5; } if (key == KEY_DOWN) { sel++; if (sel > 5) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_edit_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_block_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: do_search(); break; case 1: find_next(); break; case 2: find_prev(); break; case 3: do_replace(); break; case 4: do_replace_all(); break; case 5: goto_line(); break; } return; } } draw_screen(); }
 
@@ -4071,7 +4109,7 @@ void show_block_menu(void) { int x1 = 21, y1 = 1, w = 18, h = 9, sel = 0, key, i
 
 void show_options_menu(void) { int x1 = 29, y1 = 1, w = 22, h = 10, sel = 0, key, i; char items[8][25]; const char *langname; while (1) { langname = (doc.input_lang == LANG_HEB) ? "Hebrew" : (doc.input_lang == LANG_ARA) ? "Arabic" : (doc.input_lang == LANG_RUS) ? "Russian" : "English"; sprintf(items[0], "Lang: %-7s    F4", langname); sprintf(items[1], "[%c] Embed English F10", doc.embedded_ltr ? 'X' : ' '); sprintf(items[2], "[%c] RTL Mode       F5", doc.rtl_mode ? 'X' : ' '); sprintf(items[3], "[%c] Word Wrap", doc.word_wrap ? 'X' : ' '); sprintf(items[4], "[%c] Show Ruler", doc.show_ruler ? 'X' : ' '); sprintf(items[5], "[%c] Insert Mode   Ins", doc.insert_mode ? 'X' : ' '); sprintf(items[6], "[%c] Save Reminder 10m", doc.save_reminder ? 'X' : ' '); strcpy(items[7], "----------------------"); draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 8; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(4, x1, y1, x1 + w, y1 + h, 8, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 6; } while (sel == 7); } if (key == KEY_DOWN) { do { sel++; if (sel > 6) sel = 0; } while (sel == 7); } if (key == KEY_LEFT) { draw_screen(); show_block_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_tools_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER || key == ' ') { switch (sel) { case 0: cycle_input_lang(); break; case 1: toggle_embedded_ltr(); break; case 2: toggle_rtl(); break; case 3: toggle_wrap(); break; case 4: doc.show_ruler = !doc.show_ruler; draw_screen(); break; case 5: toggle_insert(); break; case 6: toggle_save_reminder(); break; } } } draw_screen(); }
 
-void show_tools_menu(void) { int x1 = 37, y1 = 1, w = 24, h = 12, sel = 0, key, i; const char *items[] = {"Word Count","Go To Line","Insert Date/Time","----------------------","Spell Check (Eng)","Read Aloud","Stop Speech","Translate to Hebrew","Dictate (Speech)","Paste Host   Alt+V"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 10; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(5, x1, y1, x1 + w, y1 + h, 10, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 9; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 9) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_options_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_help_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: word_count(); break; case 1: goto_line(); break; case 2: insert_date_time(); break; case 4: assist_spell_check(); break; case 5: assist_read_aloud(); break; case 6: assist_stop_speech(); break; case 7: assist_translate(); break; case 8: assist_dictate(); break; case 9: assist_paste_clipboard(); break; } return; } } draw_screen(); }
+void show_tools_menu(void) { int x1 = 37, y1 = 1, w = 24, h = 12, sel = 0, key, i; const char *items[] = {"Word Count","Go To Line","Insert Date/Time","----------------------","Spell Check","Read Aloud","Stop Speech","Translate to Hebrew","Dictate (Speech)","Paste Host   Alt+V","Copy to Host Alt+C"}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 11; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel && items[i][0] != '-') ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(5, x1, y1, x1 + w, y1 + h, 11, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { do { sel--; if (sel < 0) sel = 10; } while (items[sel][0] == '-'); } if (key == KEY_DOWN) { do { sel++; if (sel > 10) sel = 0; } while (items[sel][0] == '-'); } if (key == KEY_LEFT) { draw_screen(); show_options_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_help_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: word_count(); break; case 1: goto_line(); break; case 2: insert_date_time(); break; case 4: assist_spell_check(); break; case 5: assist_read_aloud(); break; case 6: assist_stop_speech(); break; case 7: assist_translate(); break; case 8: assist_dictate(); break; case 9: assist_paste_clipboard(); break; case 10: assist_copy_clipboard(); break; } return; } } draw_screen(); }
 
 void show_help_menu(void) { int x1 = 44, y1 = 1, w = 14, h = 5, sel = 0, key, i; const char *items[] = {"Help     F1","Docs...","About..."}; while (1) { draw_box(x1, y1, x1 + w, y1 + h, CLR_MENU, NULL); for (i = 0; i < 3; i++) write_string(x1 + 1, y1 + 1 + i, items[i], (i == sel) ? CLR_MENU_SEL : CLR_MENU); hide_cursor(); key = menu_input(6, x1, y1, x1 + w, y1 + h, 3, &sel); if (key == 0 || key == 0xE0) { key = getch(); if (key == KEY_UP) { sel--; if (sel < 0) sel = 2; } if (key == KEY_DOWN) { sel++; if (sel > 2) sel = 0; } if (key == KEY_LEFT) { draw_screen(); show_tools_menu(); return; } if (key == KEY_RIGHT) { draw_screen(); show_file_menu(); return; } } else if (key == KEY_ESC) break; else if (key == KEY_ENTER) { draw_screen(); switch (sel) { case 0: show_help(); break; case 1: show_docs(); break; case 2: show_about(); break; } return; } } draw_screen(); }
 
@@ -4101,7 +4139,7 @@ void process_key(int key, int extended)
             case KEY_CTRL_RIGHT: move_cursor(5, 0); break;
             case KEY_F1: show_help(); break;
             case KEY_F2: if (doc.encrypted) save_file_encrypted(doc.filename, doc.password); else save_file(doc.filename); draw_screen(); break;
-            case KEY_F3: fn[0] = '\0'; if (file_dialog("Open File", fn, sizeof(fn), 0)) { load_file(fn); draw_screen(); } break;
+            case KEY_F3: if (!doc.modified || confirm_dialog("Open File", "Discard changes?")) { fn[0] = '\0'; if (file_dialog("Open File", fn, sizeof(fn), 0)) { load_file(fn); draw_screen(); } } break;
             case KEY_F4: cycle_input_lang(); draw_screen(); break;
             case KEY_F5: toggle_rtl(); break;
             case KEY_F6: 
@@ -4126,6 +4164,7 @@ void process_key(int key, int extended)
             case KEY_ALT_L: toggle_underline(); break;
             case KEY_ALT_U: toggle_boldunder(); break;
             case KEY_ALT_V: assist_paste_clipboard(); break;
+            case KEY_ALT_C: assist_copy_clipboard(); break;
         }
     } else {
         switch (key) {

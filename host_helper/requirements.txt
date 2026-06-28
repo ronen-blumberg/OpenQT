@@ -21,6 +21,16 @@ sounddevice==0.4.7
 #       Linux:   apt install aspell aspell-en
 #       Windows: GNU Aspell port, or skip (Spell Check just reports "not installed")
 #       macOS:   brew install aspell
+#   hspell  OR  aspell + its Hebrew ('he') dictionary   (Hebrew spell check --
+#                         used when the editor is in Hebrew mode via F4. The
+#                         daemon prefers hspell, falling back to aspell-he; both
+#                         are ISO-8859-8 ispell-protocol engines.)
+#       Linux:   apt install hspell        (best: real Hebrew morphology)
+#            or: apt install aspell-he      (cross-platform word-list fallback)
+#       Windows: GNU Aspell port + its Hebrew dictionary (hspell has no Windows
+#                build); without either, Hebrew Spell Check reports "not
+#                installed" and English still works
+#       macOS:   brew install aspell        (bundles the 'he' dictionary)
 #   espeak-ng            (read-aloud / text-to-speech)
 #       Linux:   apt install espeak-ng
 #       Windows: github.com/espeak-ng/espeak-ng releases (add to PATH)

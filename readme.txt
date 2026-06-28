@@ -4,7 +4,7 @@
                          ║     QText 5.5 Compatible         ║
                          ╚══════════════════════════════════╝
 
-                              Version 3.8.0 - Public Domain
+                              Version 3.9.0 - Public Domain
 
          NOTE: This file is a legacy summary. The complete, current
          documentation is in README.md (Hebrew/English/Arabic/Russian,

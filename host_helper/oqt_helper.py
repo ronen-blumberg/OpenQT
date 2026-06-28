@@ -3,10 +3,12 @@
 OpenQT host helper daemon.
 
 Bridges the DOS editor (running in DOSBox-X) to host-side language tools:
-  * SPELL    - English spell check via aspell
+  * SPELL    - spell check (English via aspell, Hebrew via hspell/aspell-he)
   * TTS      - read-aloud via espeak-ng (en/he/ar/ru)
   * XLATE    - English -> Hebrew translation via deep-translator (online)
   * RECSTART/RECSTOP/RECCANCEL - dictation (speech-to-text, en/he) via arecord + faster-whisper
+  * CLIP     - Smart Paste: host clipboard (UTF-8) -> editor codepage bytes
+  * CLIPSET  - Copy to Host: editor codepage bytes -> host clipboard (UTF-8)
   * PING     - round-trip self-test
 
 It watches a shared folder (the DOSBox C: mount) for a request file written by
@@ -211,6 +213,38 @@ def _win_clipboard_get():
         u32.CloseClipboard()
 
 
+def _win_clipboard_set(text):
+    """Write CF_UNICODETEXT to the Windows clipboard via ctypes -- the write-side
+    mirror of _win_clipboard_get(), no pip dep and proper Unicode."""
+    import ctypes
+    from ctypes import wintypes
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
+    u32 = ctypes.windll.user32
+    k32 = ctypes.windll.kernel32
+    k32.GlobalAlloc.restype = wintypes.HGLOBAL
+    k32.GlobalLock.restype = ctypes.c_void_p
+    if not u32.OpenClipboard(0):
+        raise RuntimeError("cannot open Windows clipboard")
+    try:
+        u32.EmptyClipboard()
+        buf = ctypes.create_unicode_buffer(text)    # includes the NUL terminator
+        size = ctypes.sizeof(buf)
+        h = k32.GlobalAlloc(GMEM_MOVEABLE, size)
+        if not h:
+            raise RuntimeError("GlobalAlloc failed")
+        p = k32.GlobalLock(h)
+        if not p:
+            raise RuntimeError("GlobalLock failed")
+        ctypes.memmove(p, buf, size)
+        k32.GlobalUnlock(h)
+        if not u32.SetClipboardData(CF_UNICODETEXT, h):
+            raise RuntimeError("SetClipboardData failed")
+        # the clipboard now owns h -- must NOT free it
+    finally:
+        u32.CloseClipboard()
+
+
 def _run_capture(cmd, env=None):
     """Run a clipboard-reader command and return its UTF-8 stdout."""
     try:
@@ -221,6 +255,22 @@ def _run_capture(cmd, env=None):
         raise RuntimeError("clipboard read failed: %s"
                            % r.stderr.decode("utf-8", "replace")[:120])
     return r.stdout.decode("utf-8", "replace")
+
+
+def _run_feed(cmd, text, env=None):
+    """Run a clipboard-writer command, feeding 'text' as UTF-8 on stdin.
+    stdout/stderr go to DEVNULL rather than pipes on purpose: tools like xclip
+    and wl-copy fork a background process to *serve* the selection, and that
+    child would hold a captured pipe open indefinitely -- hanging us until the
+    timeout even though the write already succeeded."""
+    try:
+        r = subprocess.run(cmd, input=text.encode("utf-8"),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=5, env=env)
+    except Exception as e:
+        raise RuntimeError("clipboard write error: %s" % e)
+    if r.returncode != 0:
+        raise RuntimeError("clipboard write failed (exit %d)" % r.returncode)
 
 
 def read_host_clipboard():
@@ -252,6 +302,40 @@ def read_host_clipboard():
     env = dict(os.environ)
     env.setdefault("DISPLAY", ":0")
     return _run_capture(cmd, env=env)
+
+
+def write_host_clipboard(text):
+    """Put a Unicode string on the host clipboard, or raise RuntimeError. The
+    write-side mirror of read_host_clipboard(): ctypes on Windows, pbcopy on
+    macOS, wl-copy/xclip/xsel on Linux (pyperclip as a last resort). The Linux
+    tools ship in the same packages as their -paste counterparts (wl-clipboard,
+    xclip, xsel)."""
+    if IS_WINDOWS:
+        _win_clipboard_set(text)
+        return
+    if IS_MAC:
+        if _which("pbcopy"):
+            _run_feed(["pbcopy"], text)
+            return
+        raise RuntimeError("pbcopy not found")
+    # Linux / other X11 / Wayland
+    if _which("wl-copy"):
+        cmd = ["wl-copy"]
+    elif _which("xclip"):
+        cmd = ["xclip", "-selection", "clipboard", "-i"]
+    elif _which("xsel"):
+        cmd = ["xsel", "-b", "-i"]
+    else:
+        try:                                # last resort: optional pip package
+            import pyperclip
+            pyperclip.copy(text)
+            return
+        except Exception:
+            raise RuntimeError(
+                "no clipboard tool (install xclip, xsel, or wl-clipboard)")
+    env = dict(os.environ)
+    env.setdefault("DISPLAY", ":0")
+    _run_feed(cmd, text, env=env)
 
 
 def oqt_to_unicode(data, lang):
@@ -514,24 +598,26 @@ def handle_xlate(lang, payload):
 
 
 def handle_spell(lang, payload):
-    """Run aspell over each document line; report misspellings with a 0-based
-    column offset into the original line and comma-joined suggestions."""
-    if not _which("aspell"):
-        return "ERR", b"aspell not installed"
-    raw_lines = payload.split(b"\n")
-    skeletons = [ascii_skeleton_line(rl) for rl in raw_lines]
-    # Feed all lines to one aspell -a process; "^" forces check mode per line.
-    feed = "".join("^" + s + "\n" for s in skeletons)
-    try:
-        proc = subprocess.run(
-            ["aspell", "-a", "--lang=en", "--encoding=utf-8"],
-            input=feed, capture_output=True, text=True)
-    except Exception as e:
-        return "ERR", ("aspell failed: %s" % e).encode()
+    """Spell-check the document, picking the engine by the editor's current
+    language (the F4 cycle): English -> aspell, Hebrew -> hspell. Arabic and
+    Russian have no bundled engine, so they report a friendly message."""
+    if lang == "HE":
+        return _spell_hebrew(payload)
+    if lang in ("AR", "RU"):
+        return "ERR", (b"Spell check is only available for English and Hebrew "
+                       b"(switch language with F4).")
+    return _spell_english(payload)
+
+
+def _parse_ispell(out_lines, skeletons):
+    """Parse ispell '-a' pipe-mode output (aspell and hspell both speak it) into
+    (line, col, word, suggs) tuples. `out_lines` and `skeletons` must be in the
+    same string space (ASCII for aspell, Unicode Hebrew for hspell) so the
+    column lookup matches. Returns words/suggestions as strings in that space."""
     findings = []
-    line_idx = -1            # aspell emits a banner line first, then blocks
+    line_idx = -1            # the engine emits a banner line first, then blocks
     saw_banner = False
-    for out in proc.stdout.splitlines():
+    for out in out_lines:
         if not saw_banner:
             saw_banner = True       # first line is the @(#) version banner
             continue
@@ -551,11 +637,111 @@ def handle_spell(lang, payload):
             col = _locate(skeletons[line_idx + 1] if line_idx + 1 < len(skeletons) else "",
                           word, rep_off)
             findings.append((line_idx + 1, col, word, suggs))
-    # serialize: line<TAB>col<TAB>word<TAB>s1,s2,...
-    lines = ["%d\t%d\t%s\t%s" % (ln, col, w, ",".join(s))
-             for (ln, col, w, s) in findings]
-    body = ("SPELL %d\n" % len(findings)) + "\n".join(lines)
-    return "OK", body.encode("ascii", "replace")
+    return findings
+
+
+def _spell_serialize(findings):
+    """findings: list of (line:int, col:int, word:bytes, suggs:[bytes]).
+    Emit 'SPELL N\\n' then one 'line<TAB>col<TAB>word<TAB>s1,s2,...' record per
+    finding as raw bytes -- numbers/separators are ASCII, but the word and
+    suggestions stay in their native codepage bytes (CP862 Hebrew survives,
+    where a plain .encode('ascii') would mangle it to '?')."""
+    out = bytearray()
+    out += ("SPELL %d\n" % len(findings)).encode("ascii")
+    for i, (ln, col, word, suggs) in enumerate(findings):
+        if i:
+            out += b"\n"
+        out += ("%d\t%d\t" % (ln, col)).encode("ascii")
+        out += word + b"\t" + b",".join(suggs)
+    return "OK", bytes(out)
+
+
+def _spell_english(payload):
+    """English spell check via aspell. Each byte maps to one ASCII skeleton
+    column so aspell offsets index straight back into the document line."""
+    if not _which("aspell"):
+        return "ERR", b"aspell not installed"
+    raw_lines = payload.split(b"\n")
+    skeletons = [ascii_skeleton_line(rl) for rl in raw_lines]
+    # Feed all lines to one aspell -a process; "^" forces check mode per line.
+    feed = "".join("^" + s + "\n" for s in skeletons)
+    try:
+        proc = subprocess.run(
+            ["aspell", "-a", "--lang=en", "--encoding=utf-8"],
+            input=feed, capture_output=True, text=True)
+    except Exception as e:
+        return "ERR", ("aspell failed: %s" % e).encode()
+    findings = [(ln, col, w.encode("ascii", "replace"),
+                 [s.encode("ascii", "replace") for s in sg])
+                for (ln, col, w, sg) in _parse_ispell(proc.stdout.splitlines(),
+                                                       skeletons)]
+    return _spell_serialize(findings)
+
+
+def _hebrew_skeleton(raw_line):
+    """One Unicode char per source byte (Hebrew CP862 -> Unicode letter, ASCII
+    kept, format/other bytes -> space) so hspell's character offsets map 1:1
+    back to the document line's CP862 byte index. hspell silently ignores Latin
+    runs, so embedded English in a Hebrew document is never flagged."""
+    out = []
+    for b in raw_line:
+        if 0x20 <= b < 0x7F:
+            out.append(chr(b))
+        elif b in CP862:
+            out.append(chr(CP862[b]))
+        else:
+            out.append(" ")
+    return "".join(out)
+
+
+def _aspell_has_hebrew():
+    """True if aspell has its Hebrew ('he') dictionary installed."""
+    try:
+        out = subprocess.run(["aspell", "dicts"],
+                             capture_output=True, text=True).stdout
+    except Exception:
+        return False
+    return any(ln.strip() == "he" for ln in out.splitlines())
+
+
+def _hebrew_engine():
+    """Pick the Hebrew spell engine: prefer hspell (real morphology, Linux-only),
+    fall back to aspell's 'he' dictionary (cross-platform -- works wherever aspell
+    and the Hebrew word list install, including Windows/macOS). Both speak the
+    ispell '-a' protocol in ISO-8859-8 and report 1-based character offsets, so the
+    rest of the pipeline is identical. Returns the argv list, or None if neither."""
+    if _which("hspell"):
+        return ["hspell", "-a"]
+    if _which("aspell") and _aspell_has_hebrew():
+        return ["aspell", "-a", "--lang=he", "--encoding=iso-8859-8"]
+    return None
+
+
+def _spell_hebrew(payload):
+    """Hebrew spell check. Both supported engines (hspell, aspell+he) use the
+    ispell '-a' protocol in ISO-8859-8 -- logical order, the order OpenQT already
+    stores -- so words/suggestions come back as CP862 bytes ready for the editor
+    to render and insert directly."""
+    engine = _hebrew_engine()
+    if engine is None:
+        hint = (b"Hebrew spell check needs the aspell Hebrew dictionary "
+                b"(install aspell's 'he' dict), or a Linux host with hspell."
+                if (IS_WINDOWS or IS_MAC) else
+                b"Hebrew spell check not installed -- run: sudo apt install "
+                b"hspell  (or: sudo apt install aspell-he)")
+        return "ERR", hint
+    raw_lines = payload.split(b"\n")
+    skeletons = [_hebrew_skeleton(rl) for rl in raw_lines]
+    feed = "".join("^" + s + "\n" for s in skeletons).encode("iso-8859-8", "replace")
+    try:
+        proc = subprocess.run(engine, input=feed, capture_output=True)
+    except Exception as e:
+        return "ERR", ("%s failed: %s" % (engine[0], e)).encode()
+    out_lines = [ln.decode("iso-8859-8", "replace")
+                 for ln in proc.stdout.split(b"\n")]
+    findings = [(ln, col, hebrew_to_oqt(w), [hebrew_to_oqt(s) for s in sg])
+                for (ln, col, w, sg) in _parse_ispell(out_lines, skeletons)]
+    return _spell_serialize(findings)
 
 
 def _locate(skeleton, word, reported):
@@ -620,6 +806,19 @@ def handle_clip(lang, payload):
     return "OK", data
 
 
+def handle_clipset(lang, payload):
+    """Copy to Host: convert the editor's raw codepage bytes (selection or whole
+    document) to UTF-8 and put them on the host clipboard."""
+    text = oqt_to_unicode(payload, lang)
+    if not text:
+        return "ERR", b"nothing to copy"
+    try:
+        write_host_clipboard(text)
+    except RuntimeError as e:
+        return "ERR", str(e).encode("utf-8")[:200]
+    return "OK", ("%d chars copied" % len(text)).encode("ascii", "replace")
+
+
 HANDLERS = {
     "PING": handle_ping,
     "TTS": handle_tts,
@@ -630,6 +829,7 @@ HANDLERS = {
     "RECSTOP": handle_recstop,
     "RECCANCEL": handle_reccancel,
     "CLIP": handle_clip,
+    "CLIPSET": handle_clipset,
 }
 
 

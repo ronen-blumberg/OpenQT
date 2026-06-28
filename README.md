@@ -13,7 +13,7 @@ trilingual screen font.
 
 > **Author:** Ronen Blumberg  
 > **License:** Public Domain  
-> **Current version:** OpenQT 3.8.0  
+> **Current version:** OpenQT 3.9.0  
 > **Platform:** Real-mode 16-bit DOS, or 32-bit DOS via DOS4GW (bundled).
 
 ---
@@ -1117,7 +1117,30 @@ The reorder logic is the inverse of OpenQT's BiDi pass.
 
 ## Version history
 
-### Version 3.8 (current)
+### Version 3.9 (current)
+
+- **Hebrew spell check** — **Tools → Spell Check** is now language-aware and
+  follows the F4 input language. English is checked with `aspell` as before;
+  Hebrew is checked with **`hspell`** (a real morphological Hebrew checker),
+  falling back to **aspell's Hebrew dictionary** on hosts where hspell isn't
+  available (e.g. Windows/macOS). Misspelled Hebrew words are flagged with
+  suggestions just like English, and embedded English inside a Hebrew document
+  is left alone. Arabic/Russian show a "switch language with F4" note (no
+  bundled engine).
+- **Copy to Host (Alt+C)** — the outbound mirror of Paste Host: sends the
+  marked block (or the whole document) to the **host OS clipboard** as UTF-8,
+  so Hebrew/Arabic/Russian text can be pasted into any host application —
+  something DOSBox-X's own clipboard cannot do for non-Latin text. Available
+  from **Tools → Copy to Host** or the **Alt+C** shortcut.
+- **Fix: unsaved-changes warning on Open** — opening a file (File → Open or
+  **F3**) now prompts "Discard changes?" when the current document has unsaved
+  edits, matching the behaviour of New. Previously Open silently replaced an
+  edited or freshly-pasted document.
+- **Fix: Select All + Copy** — **Edit → Select All** now selects the whole
+  document *and* leaves the caret at the end, so a following **Copy** captures
+  everything (it previously reported an empty selection).
+
+### Version 3.8
 
 - **Reformat (reflow)** — **Block → Reformat** re-wraps text to the column-71
   margin: short lines are joined and long lines are re-split at word

@@ -12,8 +12,8 @@
 /* Version Information                                                        */
 /*---------------------------------------------------------------------------*/
 
-#define OPENQT_VERSION      "3.8.0"
-#define OPENQT_VERSION_NUM  0x0380
+#define OPENQT_VERSION      "3.9.0"
+#define OPENQT_VERSION_NUM  0x0390
 #define OPENQT_YEAR         "2026"
 
 /*---------------------------------------------------------------------------*/

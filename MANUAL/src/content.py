@@ -33,8 +33,8 @@ def emit(doc, L):
         "באופן מועדף, ב-32-ביט דרך מרחיב ה-DOS4GW המצורף. בתוך DOSBox או "
         "DOSBox-X הוא פועל על כל מארח מודרני של Linux, Windows או macOS."))
     doc.note(t("Author: Ronen Blumberg.  License: Public Domain.  "
-               "Version: OpenQT 3.8.0.",
-               "מחבר: רונן בלומברג.  רישיון: נחלת הכלל.  גרסה: OpenQT 3.8.0."),
+               "Version: OpenQT 3.9.0.",
+               "מחבר: רונן בלומברג.  רישיון: נחלת הכלל.  גרסה: OpenQT 3.9.0."),
              "note")
 
     doc.h2(t("Key features", "תכונות עיקריות"))
@@ -185,6 +185,8 @@ def emit(doc, L):
                ["F9", t("Paste block at cursor", "הדבקת גוש במיקום הסמן")],
                ["Alt+V", t("Paste host clipboard (via helper)",
                            "הדבקת לוח-הגזירים של המארח (דרך העוזר)")],
+               ["Alt+C", t("Copy selection/document to host clipboard",
+                           "העתקת הבחירה/המסמך ללוח-הגזירים של המארח")],
                ["Alt+B", t("Open Block menu (start/end/copy/cut/paste/"
                            "delete/reformat)",
                            "פתיחת תפריט גוש (התחלה/סיום/העתקה/גזירה/"
@@ -466,9 +468,12 @@ def emit(doc, L):
         "ידווחו 'Helper not responding' ושאר העורך אינו מושפע."))
     doc.table([t("Tools item", "פריט בכלים"), t("What it does", "מה הוא עושה"),
                t("Engine", "מנוע")],
-              [[t("Spell Check (Eng)", "בדיקת איות (אנג')"),
-                t("Highlights unknown English words with numbered suggestions",
-                  "מסמן מילים אנגליות לא מוכרות עם הצעות ממוספרות"), "aspell"],
+              [[t("Spell Check", "בדיקת איות"),
+                t("Flags unknown words with numbered suggestions; follows the "
+                  "F4 language (English/Hebrew)",
+                  "מסמן מילים לא מוכרות עם הצעות ממוספרות; עוקב אחר שפת F4 "
+                  "(אנגלית/עברית)"),
+                t("aspell/hspell", "aspell/hspell")],
                [t("Read Aloud", "הקראה"),
                 t("Speaks the selection or document; voice follows F4 language",
                   "מקריא את הבחירה או המסמך; הקול עוקב אחר שפת F4"), "espeak-ng"],
@@ -481,7 +486,12 @@ def emit(doc, L):
                   "מקליט מהמיקרופון ומכניס טקסט מזוהה (אנג'/עב')"), "whisper"],
                [t("Paste Host", "הדבקה מהמארח"),
                 t("Inserts host clipboard as clean text for the F4 language",
-                  "מכניס את לוח-הגזירים של המארח כטקסט נקי לשפת F4"), "xclip"]],
+                  "מכניס את לוח-הגזירים של המארח כטקסט נקי לשפת F4"), "xclip"],
+               [t("Copy to Host", "העתקה למארח"),
+                t("Sends the selection or document to the host clipboard as "
+                  "UTF-8 (Alt+C)",
+                  "שולח את הבחירה או המסמך ללוח-הגזירים של המארח כ-UTF-8 "
+                  "(Alt+C)"), "xclip"]],
               widths=[1.2, 2.6, 1])
     doc.note(t("Paste Host (also Alt+V) strips niqqud and harakat and folds "
                "smart quotes and dashes to ASCII -- use it instead of "
@@ -669,6 +679,12 @@ def emit(doc, L):
     # ============================================================ VERSION
     doc.h1(t("17. Version history", "17. היסטוריית גרסאות"))
     vh = [
+        ("3.9", "Hebrew spell check (hspell / aspell-he, follows F4); "
+                "Copy to Host (Alt+C); Open warns on unsaved changes; "
+                "Select All works with Copy.",
+                "בדיקת איות עברית (hspell / aspell-he, עוקבת אחר F4); "
+                "העתקה למארח (Alt+C); פתיחה מזהירה על שינויים שלא נשמרו; "
+                "בחירת הכול עובדת עם העתקה."),
         ("3.8", "Paragraph reflow (Block -> Reformat); self-drawn mouse "
                 "pointer visible in every DOSBox-X mouse mode.",
                 "עיצוב פסקאות מחדש (Block -> Reformat); סמן עכבר מצויר-עצמית "

@@ -13,7 +13,7 @@ trilingual screen font.
 
 > **Author:** Ronen Blumberg  
 > **License:** Public Domain  
-> **Current version:** OpenQT 3.9.0  
+> **Current version:** OpenQT 3.9.1  
 > **Platform:** Real-mode 16-bit DOS, or 32-bit DOS via DOS4GW (bundled).
 
 ---
@@ -1117,7 +1117,20 @@ The reorder logic is the inverse of OpenQT's BiDi pass.
 
 ## Version history
 
-### Version 3.9 (current)
+### Version 3.9.1 (current)
+
+- **Fix: undo/redo of deleted text** — undoing edits that mixed typing and
+  erasing now restores the deleted characters correctly and in order.
+  Previously each **Backspace** recorded *two* undo entries (its own plus the
+  one from the internal delete it performed), so Ctrl+Z re-inserted every
+  erased character twice and needed two presses per backspace, scrambling the
+  recovered text.
+- **Fix: line-join backspace/delete is now undoable** — joining two lines by
+  pressing **Backspace** at the start of a line (or **Delete** at the end of
+  one) can now be undone with **Ctrl+Z**, which splits the line back where it
+  was; **Ctrl+Y** re-joins. Previously the merge could not be undone at all.
+
+### Version 3.9
 
 - **Hebrew spell check** — **Tools → Spell Check** is now language-aware and
   follows the F4 input language. English is checked with `aspell` as before;

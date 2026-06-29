@@ -103,7 +103,7 @@
 #include <time.h>
 #include <direct.h>
 
-#define VERSION         "3.9.0"
+#define VERSION         "3.9.1"
 #define MAX_LINES       30000  /* ~500 pages */
 #define MAX_LINE_LEN    256
 #define SAVE_REMIND_SEC 600   /* Save reminder interval in seconds (600 = 10 min) */
@@ -398,7 +398,7 @@ static char g_mptr_ch = 0, g_mptr_attr = 0;  /* saved cell under the pointer */
 
 /* Undo/Redo system */
 typedef struct {
-    int type;           /* 0=insert_char, 1=delete_char, 2=insert_line, 3=delete_line, 4=backspace */
+    int type;           /* 0=insert_char, 1=delete_char, 2=insert_line, 3=delete_line, 4=backspace, 5=join_line (col=split point) */
     int line;
     int col;
     unsigned char ch;
@@ -409,6 +409,11 @@ static UndoItem undo_stack[MAX_UNDO];
 static int undo_pos = 0;
 static int undo_count = 0;
 static int redo_count = 0;
+/* Set transiently by backspace_char() so the delete_char() it calls does not
+ * push a second (type-1) undo record on top of backspace's own type-4 record.
+ * Without this every backspace records twice and undo re-inserts each char
+ * twice, scrambling restored text. */
+static int undo_suppress = 0;
 
 static char search_text[256] = "";
 static char replace_text[256] = "";
@@ -2280,13 +2285,19 @@ void delete_char(void)
     
     if (doc.cursor_x < len) {
         deleted_ch = (unsigned char)line[doc.cursor_x];
-        push_undo(1, doc.cursor_y, doc.cursor_x, deleted_ch, NULL);
+        if (!undo_suppress)
+            push_undo(1, doc.cursor_y, doc.cursor_x, deleted_ch, NULL);
         memmove(line + doc.cursor_x, line + doc.cursor_x + 1, len - doc.cursor_x);
         doc.modified = 1;
     } else if (doc.cursor_y < doc.num_lines - 1) {
         char *next = doc.lines[doc.cursor_y + 1];
         int next_len = next ? (int)strlen(next) : 0;
         if (len + next_len < MAX_LINE_LEN - 1) {
+            /* Record the join so undo can split it back at column len.
+             * Reached by Delete at end of line and by Backspace at column 0;
+             * not gated by undo_suppress (backspace only suppresses its
+             * in-line type-1 delete, never the join branch). */
+            push_undo(5, doc.cursor_y, len, 0, NULL);
             if (next) strcat(line, next);
             free(doc.lines[doc.cursor_y + 1]);
             memmove(&doc.lines[doc.cursor_y + 1], &doc.lines[doc.cursor_y + 2],
@@ -2320,7 +2331,9 @@ void backspace_char(void)
             push_undo(4, doc.cursor_y, doc.cursor_x - 1, deleted_ch, NULL);
         }
         doc.cursor_x--;
+        undo_suppress = 1;   /* backspace already recorded its own undo above */
         delete_char();
+        undo_suppress = 0;
     } else if (doc.cursor_y > 0) {
         doc.cursor_y--;
         doc.cursor_x = strlen(doc.lines[doc.cursor_y]);
@@ -3445,8 +3458,29 @@ void undo_action(void)
             doc.cursor_y = item->line;
             doc.cursor_x = item->col + 1;
             break;
+
+        case 5: /* Undo line-join - split line item->line back at item->col */
+            if (item->line < doc.num_lines && doc.num_lines < MAX_LINES) {
+                char *upper = doc.lines[item->line];
+                int ulen = upper ? (int)strlen(upper) : 0;
+                int splitc = item->col;
+                char *newline;
+                if (splitc > ulen) splitc = ulen;
+                newline = (char *)malloc(MAX_LINE_LEN);
+                if (newline) {
+                    strcpy(newline, upper + splitc);
+                    upper[splitc] = '\0';
+                    for (i = doc.num_lines; i > item->line + 1; i--)
+                        doc.lines[i] = doc.lines[i - 1];
+                    doc.lines[item->line + 1] = newline;
+                    doc.num_lines++;
+                }
+                doc.cursor_y = item->line;
+                doc.cursor_x = splitc;
+            }
+            break;
     }
-    
+
     draw_screen();
 }
 
@@ -3526,8 +3560,26 @@ void redo_action(void)
             doc.cursor_y = item->line;
             doc.cursor_x = item->col;
             break;
+
+        case 5: /* Redo line-join - merge line item->line+1 up */
+            if (item->line + 1 < doc.num_lines) {
+                char *upper = doc.lines[item->line];
+                char *lower = doc.lines[item->line + 1];
+                int ulen = upper ? (int)strlen(upper) : 0;
+                int llen = lower ? (int)strlen(lower) : 0;
+                if (upper && ulen + llen < MAX_LINE_LEN - 1) {
+                    if (lower) strcat(upper, lower);
+                    free(doc.lines[item->line + 1]);
+                    for (i = item->line + 1; i < doc.num_lines - 1; i++)
+                        doc.lines[i] = doc.lines[i + 1];
+                    doc.num_lines--;
+                }
+            }
+            doc.cursor_y = item->line;
+            doc.cursor_x = item->col;
+            break;
     }
-    
+
     undo_pos = (undo_pos + 1) % MAX_UNDO;
     undo_count++;
     redo_count--;
@@ -3802,10 +3854,32 @@ static int spell_nth_sugg(const char *suggs, int n, char *out, int max)
     return 0;
 }
 
+/* Reverse maximal runs of RTL (Hebrew/Arabic) bytes in place so a word stored
+ * in logical order renders correctly in an otherwise-LTR dialog. ASCII and
+ * digits are left untouched. Returns dst. */
+static char *spell_vis(const char *src, char *dst, int max)
+{
+    int n = (int)strlen(src), i = 0, k;
+    if (n > max - 1) n = max - 1;
+    while (i < n) {
+        if (is_rtl_char((unsigned char)src[i])) {
+            int run = i;
+            while (run < n && is_rtl_char((unsigned char)src[run])) run++;
+            for (k = 0; k < run - i; k++) dst[i + k] = src[run - 1 - k];
+            i = run;
+        } else {
+            dst[i] = src[i];
+            i++;
+        }
+    }
+    dst[n] = '\0';
+    return dst;
+}
+
 /* Returns: -1 stop, 0 skip, 1..9 chosen suggestion number. */
 static int spell_prompt(const char *word, const char *suggs)
 {
-    char items[9][40], hdr[64], ln[48];
+    char items[9][40], hdr[64], ln[48], vis[48];
     int nsug = 0, i, key, x1, y1, w, h, l;
     const char *p = suggs, *c;
     while (*p && nsug < 9) {
@@ -3820,10 +3894,10 @@ static int spell_prompt(const char *word, const char *suggs)
     w = 44; h = nsug + 6;
     x1 = (SCREEN_WIDTH - w) / 2; y1 = 2;
     draw_box(x1, y1, x1 + w - 1, y1 + h - 1, CLR_DIALOG, "Spell Check");
-    sprintf(hdr, "Not in dictionary: %.20s", word);
+    sprintf(hdr, "Not in dictionary: %.20s", spell_vis(word, vis, sizeof(vis)));
     write_string(x1 + 2, y1 + 1, hdr, CLR_DIALOG);
     for (i = 0; i < nsug; i++) {
-        sprintf(ln, " %d. %s", i + 1, items[i]);
+        sprintf(ln, " %d. %s", i + 1, spell_vis(items[i], vis, sizeof(vis)));
         write_string(x1 + 2, y1 + 3 + i, ln, CLR_DIALOG);
     }
     if (nsug == 0) write_string(x1 + 2, y1 + 3, " (no suggestions)", CLR_DIALOG);

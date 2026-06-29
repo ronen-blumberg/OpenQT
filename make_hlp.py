@@ -86,7 +86,7 @@ def write_hlp(path: str, text: str) -> None:
 
 HEADER = """\
 ============================================================
-            OPENQT v3.9.0 - USER GUIDE
+            OPENQT v3.9.1 - USER GUIDE
 ============================================================
 
 ENGLISH GUIDE

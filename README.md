@@ -13,7 +13,7 @@ trilingual screen font.
 
 > **Author:** Ronen Blumberg  
 > **License:** Public Domain  
-> **Current version:** OpenQT 3.9.1  
+> **Current version:** OpenQT 3.9.2  
 > **Platform:** Real-mode 16-bit DOS, or 32-bit DOS via DOS4GW (bundled).
 
 ---
@@ -478,6 +478,9 @@ and details are in [`host_helper/README.md`](host_helper/README.md).
 | **F1** | Help screen |
 | **F2** | Save current file |
 | **F3** | Open another file (file dialog) |
+| **F2** (in dialog) | Toggle wide `dir/w` multi-column file list |
+| **F3** (in dialog) | Cycle filter (`*.TXT` / `*.DOC` / `*.HEB` / `*.*`) |
+| **Tab** (in dialog) | Move focus: list → filename → Open → Cancel |
 | **Ctrl+S** | Save (no dialog) |
 | **Ctrl+N** | New document |
 | **Ctrl+Z** | Undo |
@@ -1117,7 +1120,21 @@ The reorder logic is the inverse of OpenQT's BiDi pass.
 
 ## Version history
 
-### Version 3.9.1 (current)
+### Version 3.9.2 (current)
+
+- **Wide file list in the Open/Save dialog** — press **F2** inside the dialog to
+  switch the file list between the classic single column and a wide,
+  multi-column `dir /w`-style layout that shows many more files at once. **F3**
+  cycles the filename filter (`*.TXT` / `*.DOC` / `*.HEB` / `*.*`), which was
+  previously buried behind an obscure Tab gesture.
+- **Keyboard-navigable Open/Cancel buttons** — the **Open**/**Save** and
+  **Cancel** buttons are now focus targets. **Tab** cycles focus through the
+  file list, the filename field and the two buttons; from the filename box,
+  **↓** drops onto the buttons, **←/→** switch between Open and Cancel, and
+  **Enter** activates the focused button. **Esc** still cancels. In the wide
+  list the arrow keys move by cell (**↑/↓** by a whole row).
+
+### Version 3.9.1
 
 - **Fix: undo/redo of deleted text** — undoing edits that mixed typing and
   erasing now restores the deleted characters correctly and in order.

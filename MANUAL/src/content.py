@@ -33,8 +33,8 @@ def emit(doc, L):
         "באופן מועדף, ב-32-ביט דרך מרחיב ה-DOS4GW המצורף. בתוך DOSBox או "
         "DOSBox-X הוא פועל על כל מארח מודרני של Linux, Windows או macOS."))
     doc.note(t("Author: Ronen Blumberg.  License: Public Domain.  "
-               "Version: OpenQT 3.9.0.",
-               "מחבר: רונן בלומברג.  רישיון: נחלת הכלל.  גרסה: OpenQT 3.9.0."),
+               "Version: OpenQT 3.9.2.",
+               "מחבר: רונן בלומברג.  רישיון: נחלת הכלל.  גרסה: OpenQT 3.9.2."),
              "note")
 
     doc.h2(t("Key features", "תכונות עיקריות"))
@@ -679,6 +679,12 @@ def emit(doc, L):
     # ============================================================ VERSION
     doc.h1(t("17. Version history", "17. היסטוריית גרסאות"))
     vh = [
+        ("3.9.2", "Open/Save dialog: wide dir/w file list (F2), filter "
+                  "cycle (F3), and keyboard-navigable Open/Cancel buttons "
+                  "(Tab / arrows).",
+                  "תיבת פתיחה/שמירה: רשימת קבצים רחבה בסגנון dir/w (F2), "
+                  "מעבר בין מסננים (F3), וכפתורי פתיחה/ביטול הניתנים לניווט "
+                  "במקלדת (Tab / חיצים)."),
         ("3.9", "Hebrew spell check (hspell / aspell-he, follows F4); "
                 "Copy to Host (Alt+C); Open warns on unsaved changes; "
                 "Select All works with Copy.",

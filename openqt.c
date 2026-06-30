@@ -103,7 +103,7 @@
 #include <time.h>
 #include <direct.h>
 
-#define VERSION         "3.9.1"
+#define VERSION         "3.9.2"
 #define MAX_LINES       30000  /* ~500 pages */
 #define MAX_LINE_LEN    256
 #define SAVE_REMIND_SEC 600   /* Save reminder interval in seconds (600 = 10 min) */
@@ -3592,6 +3592,12 @@ void redo_action(void)
 #define MAX_DIR_ENTRIES 200
 #define FILE_LIST_HEIGHT 12
 
+/* file_dialog focus regions (Tab cycles through them) */
+#define FD_LIST   0
+#define FD_NAME   1
+#define FD_OPEN   2
+#define FD_CANCEL 3
+
 int file_dialog(const char *title, char *filename, int maxlen, int save_mode)
 {
     struct find_t finfo;
@@ -3603,49 +3609,120 @@ int file_dialog(const char *title, char *filename, int maxlen, int save_mode)
     int list_x, list_y, list_w, list_h, name_x, name_y, name_w;
     int filter_idx = 0;
     const char *filters[] = { "*.TXT", "*.DOC", "*.HEB", "*.*" };
-    int done = 0, result = 0, in_name_field = save_mode ? 1 : 0, name_pos;
+    int done = 0, result = 0, name_pos;
+    int focus = save_mode ? FD_NAME : FD_LIST;
+    int wide_mode = 0, cols_n, page, accept;
     char name_buf[256];
-    
+
     getcwd(cwd, sizeof(cwd));
     strcpy(pattern, filters[filter_idx]);
     strcpy(name_buf, filename);
     name_pos = strlen(name_buf);
     list_x = x1 + 2; list_y = y1 + 3; list_w = w - 4; list_h = FILE_LIST_HEIGHT;
     name_x = x1 + 12; name_y = y1 + h - 3; name_w = w - 16;
-    
+
     while (!done) {
         entry_count = 0;
         entries[entry_count] = (char *)malloc(16); strcpy(entries[entry_count], ".."); is_dir[entry_count] = 1; entry_count++;
         if (_dos_findfirst("*.*", _A_SUBDIR, &finfo) == 0) { do { if ((finfo.attrib & _A_SUBDIR) && finfo.name[0] != '.') { if (entry_count < MAX_DIR_ENTRIES) { entries[entry_count] = (char *)malloc(16); strncpy(entries[entry_count], finfo.name, 12); entries[entry_count][12] = '\0'; is_dir[entry_count] = 1; entry_count++; } } } while (_dos_findnext(&finfo) == 0); }
         if (_dos_findfirst(pattern, _A_NORMAL, &finfo) == 0) { do { if (!(finfo.attrib & _A_SUBDIR)) { if (entry_count < MAX_DIR_ENTRIES) { entries[entry_count] = (char *)malloc(16); strncpy(entries[entry_count], finfo.name, 12); entries[entry_count][12] = '\0'; is_dir[entry_count] = 0; entry_count++; } } } while (_dos_findnext(&finfo) == 0); }
+
+        /* Column count: wide ("dir/w") packs entries 15 cols apart; narrow = 1 per row.
+         * Keep 'top' aligned to a full row so column-major scrolling stays clean. */
+        cols_n = wide_mode ? (list_w / 15) : 1;
+        if (cols_n < 1) cols_n = 1;
+        page = list_h * cols_n;
         if (sel >= entry_count) sel = entry_count - 1; if (sel < 0) sel = 0;
-        
+        if (top % cols_n) top -= top % cols_n;
+        while (sel < top) top -= cols_n;
+        while (sel >= top + page) top += cols_n;
+        if (top < 0) top = 0;
+
         draw_box(x1, y1, x1 + w - 1, y1 + h - 1, CLR_DIALOG, title);
         write_string(x1 + 2, y1 + 1, "Directory: ", CLR_DIALOG);
         fill_rect(x1 + 13, y1 + 1, x1 + w - 3, y1 + 1, ' ', CLR_DIALOG);
         write_string(x1 + 13, y1 + 1, cwd, CLR_DIALOG);
         draw_box(list_x - 1, list_y - 1, list_x + list_w, list_y + list_h, CLR_MENU, NULL);
-        
-        for (i = 0; i < list_h; i++) { int idx = top + i; fill_rect(list_x, list_y + i, list_x + list_w - 1, list_y + i, ' ', (idx == sel && !in_name_field) ? CLR_MENU_SEL : CLR_MENU); if (idx < entry_count) { char display[20]; if (is_dir[idx]) sprintf(display, "[%s]", entries[idx]); else strcpy(display, entries[idx]); write_string(list_x + 1, list_y + i, display, (idx == sel && !in_name_field) ? CLR_MENU_SEL : CLR_MENU); } }
-        
+
+        for (i = 0; i < list_h; i++) fill_rect(list_x, list_y + i, list_x + list_w - 1, list_y + i, ' ', CLR_MENU);
+        {
+            int slot, r, c, idx, colw = list_w / cols_n;
+            for (slot = 0; slot < page; slot++) {
+                idx = top + slot;
+                if (idx >= entry_count) break;
+                r = slot / cols_n; c = slot % cols_n;
+                {
+                    char display[20];
+                    int attr = (idx == sel && focus == FD_LIST) ? CLR_MENU_SEL : CLR_MENU;
+                    if (is_dir[idx]) sprintf(display, "[%s]", entries[idx]); else strcpy(display, entries[idx]);
+                    fill_rect(list_x + c * colw, list_y + r, list_x + c * colw + colw - 1, list_y + r, ' ', attr);
+                    write_string(list_x + c * colw + 1, list_y + r, display, attr);
+                }
+            }
+        }
+
         write_string(x1 + 2, name_y, "Filename:", CLR_DIALOG);
-        fill_rect(name_x, name_y, name_x + name_w - 1, name_y, ' ', in_name_field ? CLR_MENU_SEL : CLR_MENU);
-        write_string(name_x, name_y, name_buf, in_name_field ? CLR_MENU_SEL : CLR_MENU);
+        fill_rect(name_x, name_y, name_x + name_w - 1, name_y, ' ', focus == FD_NAME ? CLR_MENU_SEL : CLR_MENU);
+        write_string(name_x, name_y, name_buf, focus == FD_NAME ? CLR_MENU_SEL : CLR_MENU);
         write_string(x1 + 2, name_y + 1, "Filter:", CLR_DIALOG);
         write_string(x1 + 10, name_y + 1, pattern, CLR_DIALOG);
-        write_string(x1 + w - 22, name_y + 1, save_mode ? "[ Save ]" : "[ Open ]", CLR_DIALOG_BTN);
-        write_string(x1 + w - 12, name_y + 1, "[ Cancel ]", CLR_DIALOG_BTN);
-        
-        if (in_name_field) { show_cursor(1); set_cursor_pos(name_x + name_pos, name_y); } else hide_cursor();
-        
+        write_string(x1 + 20, name_y + 1, "F2=Wide F3=Filter", CLR_DIALOG);
+        write_string(x1 + w - 22, name_y + 1, save_mode ? (focus == FD_OPEN ? ">Save<" : "[Save]") : (focus == FD_OPEN ? ">Open<" : "[Open]"), focus == FD_OPEN ? CLR_MENU_SEL : CLR_DIALOG_BTN);
+        write_string(x1 + w - 12, name_y + 1, focus == FD_CANCEL ? ">Cancel<" : "[Cancel]", focus == FD_CANCEL ? CLR_MENU_SEL : CLR_DIALOG_BTN);
+
+        if (focus == FD_NAME) { show_cursor(1); set_cursor_pos(name_x + name_pos, name_y); } else hide_cursor();
+
+        accept = 0;
         key = getch();
         if (key == KEY_ESC) { done = 1; result = 0; }
-        else if (key == KEY_ENTER) { if (in_name_field) { if (name_buf[0] != '\0') { strncpy(filename, name_buf, maxlen - 1); filename[maxlen - 1] = '\0'; done = 1; result = 1; } } else if (sel < entry_count) { if (is_dir[sel]) { chdir(entries[sel]); getcwd(cwd, sizeof(cwd)); sel = 0; top = 0; } else { strcpy(name_buf, entries[sel]); name_pos = strlen(name_buf); if (!save_mode) { strncpy(filename, name_buf, maxlen - 1); filename[maxlen - 1] = '\0'; done = 1; result = 1; } } } }
-        else if (key == KEY_TAB) { if (in_name_field) { filter_idx = (filter_idx + 1) % 4; strcpy(pattern, filters[filter_idx]); sel = 0; top = 0; } else in_name_field = 1; }
-        else if (key == KEY_BACKSPACE) { if (in_name_field && name_pos > 0) { memmove(name_buf + name_pos - 1, name_buf + name_pos, strlen(name_buf) - name_pos + 1); name_pos--; } }
-        else if (key == 0 || key == 0xE0) { ext_key = getch(); if (!in_name_field) { if (ext_key == KEY_UP && sel > 0) { sel--; if (sel < top) top = sel; } if (ext_key == KEY_DOWN && sel < entry_count - 1) { sel++; if (sel >= top + list_h) top = sel - list_h + 1; } if (ext_key == KEY_PGUP) { sel -= list_h; if (sel < 0) sel = 0; top = sel; } if (ext_key == KEY_PGDN) { sel += list_h; if (sel >= entry_count) sel = entry_count - 1; if (sel >= top + list_h) top = sel - list_h + 1; } } else { if (ext_key == KEY_LEFT && name_pos > 0) name_pos--; if (ext_key == KEY_RIGHT && name_pos < (int)strlen(name_buf)) name_pos++; if (ext_key == KEY_UP || ext_key == KEY_DOWN) in_name_field = 0; } }
-        else if (key >= 32 && key < 256) { if (in_name_field && (int)strlen(name_buf) < maxlen - 1) { memmove(name_buf + name_pos + 1, name_buf + name_pos, strlen(name_buf) - name_pos + 1); name_buf[name_pos] = (char)key; name_pos++; } }
-        
+        else if (key == KEY_TAB) { focus = (focus + 1) % 4; }
+        else if (key == KEY_ENTER) {
+            if (focus == FD_CANCEL) { done = 1; result = 0; }
+            else if (focus == FD_LIST) {
+                if (sel < entry_count) { if (is_dir[sel]) { chdir(entries[sel]); getcwd(cwd, sizeof(cwd)); sel = 0; top = 0; } else { strcpy(name_buf, entries[sel]); name_pos = strlen(name_buf); if (!save_mode) { strncpy(filename, name_buf, maxlen - 1); filename[maxlen - 1] = '\0'; done = 1; result = 1; } } }
+            }
+            else accept = 1;   /* FD_NAME or FD_OPEN */
+        }
+        else if (key == KEY_BACKSPACE) { if (focus == FD_NAME && name_pos > 0) { memmove(name_buf + name_pos - 1, name_buf + name_pos, strlen(name_buf) - name_pos + 1); name_pos--; } }
+        else if (key == 0 || key == 0xE0) {
+            ext_key = getch();
+            if (ext_key == KEY_F2) { wide_mode = !wide_mode; top = 0; }
+            else if (ext_key == KEY_F3) { filter_idx = (filter_idx + 1) % 4; strcpy(pattern, filters[filter_idx]); sel = 0; top = 0; }
+            else if (focus == FD_LIST) {
+                if (ext_key == KEY_UP) { if (sel - cols_n >= 0) sel -= cols_n; }
+                else if (ext_key == KEY_DOWN) { if (sel + cols_n < entry_count) sel += cols_n; else if (sel < entry_count - 1) sel = entry_count - 1; }
+                else if (ext_key == KEY_LEFT) { if (sel > 0) sel--; }
+                else if (ext_key == KEY_RIGHT) { if (sel < entry_count - 1) sel++; }
+                else if (ext_key == KEY_PGUP) { sel -= page; if (sel < 0) sel = 0; }
+                else if (ext_key == KEY_PGDN) { sel += page; if (sel >= entry_count) sel = entry_count - 1; }
+                else if (ext_key == KEY_HOME) { sel = 0; }
+                else if (ext_key == KEY_END) { sel = entry_count - 1; }
+            }
+            else if (focus == FD_NAME) {
+                if (ext_key == KEY_LEFT && name_pos > 0) name_pos--;
+                else if (ext_key == KEY_RIGHT && name_pos < (int)strlen(name_buf)) name_pos++;
+                else if (ext_key == KEY_UP) focus = FD_LIST;
+                else if (ext_key == KEY_DOWN) focus = FD_OPEN;
+            }
+            else if (focus == FD_OPEN) {
+                if (ext_key == KEY_LEFT || ext_key == KEY_RIGHT) focus = FD_CANCEL;
+                else if (ext_key == KEY_UP) focus = save_mode ? FD_NAME : FD_LIST;
+            }
+            else if (focus == FD_CANCEL) {
+                if (ext_key == KEY_LEFT || ext_key == KEY_RIGHT) focus = FD_OPEN;
+                else if (ext_key == KEY_UP) focus = save_mode ? FD_NAME : FD_LIST;
+            }
+        }
+        else if (key >= 32 && key < 256) { if (focus == FD_NAME && (int)strlen(name_buf) < maxlen - 1) { memmove(name_buf + name_pos + 1, name_buf + name_pos, strlen(name_buf) - name_pos + 1); name_buf[name_pos] = (char)key; name_pos++; } }
+
+        /* Confirm via name field / Open button: typed name wins, else the
+         * highlighted entry (file selects, directory descends). */
+        if (accept) {
+            if (name_buf[0] != '\0') { strncpy(filename, name_buf, maxlen - 1); filename[maxlen - 1] = '\0'; done = 1; result = 1; }
+            else if (sel < entry_count && !is_dir[sel]) { strncpy(filename, entries[sel], maxlen - 1); filename[maxlen - 1] = '\0'; done = 1; result = 1; }
+            else if (sel < entry_count && is_dir[sel]) { chdir(entries[sel]); getcwd(cwd, sizeof(cwd)); sel = 0; top = 0; }
+        }
+
         for (i = 0; i < entry_count; i++) free(entries[i]);
     }
     draw_screen();

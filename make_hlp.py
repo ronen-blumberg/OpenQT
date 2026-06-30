@@ -86,7 +86,7 @@ def write_hlp(path: str, text: str) -> None:
 
 HEADER = """\
 ============================================================
-            OPENQT v3.9.1 - USER GUIDE
+            OPENQT v3.9.2 - USER GUIDE
 ============================================================
 
 ENGLISH GUIDE
@@ -162,6 +162,14 @@ COPY TO HOST (v3.9):
   (or the whole document) to the host clipboard as UTF-8, so
   Hebrew/Arabic/Russian text pastes into any host app. The
   outbound mirror of Smart Paste. Needs the host helper.
+
+OPEN / SAVE DIALOG (v3.9.2):
+  F2 toggles a wide "dir/w" multi-column file list; F3
+  cycles the filter (*.TXT *.DOC *.HEB *.*). Tab moves
+  between the list, filename box and the Open/Cancel
+  buttons. In wide view the arrows move by cell (up/down
+  by a row); on the buttons Left/Right switch Open<->Cancel
+  and Enter activates the focused button. ESC still cancels.
 
 ENCRYPTION:
   File menu -> Save Encrypted -> enter password.
